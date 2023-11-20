@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from vllm import cache_ops
+# from vllm import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import in_wsl
@@ -45,10 +45,11 @@ class CacheEngine:
         self.cpu_cache = self.allocate_cpu_cache()
 
         # Initialize the stream for caching operations.
-        self.cache_stream = torch.cuda.Stream()
-        assert self.cache_stream != torch.cuda.current_stream()
+        print("config device is: ", model_config.device)
+        self.cache_stream = torch.xpu.Stream() if model_config.device == "xpu" else torch.cuda.Stream()
+        # assert self.cache_stream != torch.xpu.current_stream() if model_config.device == "xpu" else torch.cuda.current_stream()
         # Initialize the events for stream synchronization.
-        self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
+        self.events = [torch.xpu.Event() if model_config.device else torch.cuda.Event() for _ in range(self.num_layers)]
 
     def get_key_block_shape(self) -> Tuple[int, int, int, int]:
         element_size = torch.tensor([], dtype=self.dtype).element_size()
@@ -75,12 +76,12 @@ class CacheEngine:
             key_blocks = torch.empty(
                 size=(self.num_gpu_blocks, *key_block_shape),
                 dtype=self.dtype,
-                device="cuda",
+                device=self.model_config.device,
             )
             value_blocks = torch.empty(
                 size=(self.num_gpu_blocks, *value_block_shape),
                 dtype=self.dtype,
-                device="cuda",
+                device=self.model_config.device,
             )
             gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
@@ -90,6 +91,7 @@ class CacheEngine:
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
         pin_memory = not in_wsl()
+        pin_memory = False
         if not pin_memory:
             # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
@@ -115,14 +117,20 @@ class CacheEngine:
         dst: List[KVCache],
         src_to_dst: Dict[int, int],
     ) -> None:
-        with torch.cuda.stream(self.cache_stream):
+        swap_block_op = None
+        if src[0][0].device == "xpu" or dst[0][0].device == "xpu":
+            swap_block_op = torch.ops.torch_ipex.swap_blocks
+        else:
+            swap_block_op = cache_ops.swap_blocks
+        stream_context = torch.xpu.stream if self.model_config.device == "xpu" else torch.cuda.stream
+        with stream_context(self.cache_stream):
             for i in range(self.num_layers):
                 src_key_cache, src_value_cache = src[i]
                 dst_key_cache, dst_value_cache = dst[i]
                 # Copy the key blocks.
-                cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+                swap_block_op(src_key_cache, dst_key_cache, src_to_dst)
                 # Copy the value blocks.
-                cache_ops.swap_blocks(src_value_cache, dst_value_cache,
+                swap_block_op(src_value_cache, dst_value_cache,
                                       src_to_dst)
                 event = self.events[i]
                 event.record(stream=self.cache_stream)
@@ -136,8 +144,13 @@ class CacheEngine:
     def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
         key_caches = [key_cache for key_cache, _ in self.gpu_cache]
         value_caches = [value_cache for _, value_cache in self.gpu_cache]
+        copy_block_op = None
+        if key_caches[0].device == "xpu":
+            copy_block_op = torch.ops.torch_ipex.copy_blocks
+        else:
+            copy_block_op = cache_ops.copy_blocks
         # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
-        cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
+        copy_block_op(key_caches, value_caches, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(

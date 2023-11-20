@@ -5,7 +5,7 @@ from platform import uname
 import psutil
 import torch
 
-from vllm import cuda_utils
+# from vllm import cuda_utils
 
 
 class Device(enum.Enum):
@@ -28,6 +28,7 @@ class Counter:
 
 
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
+    return 65536 * 10
     """Returns the maximum shared memory per thread block in bytes."""
     # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
     cudaDevAttrMaxSharedMemoryPerBlockOptin = 97  # pylint: disable=invalid-name
@@ -38,7 +39,8 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
 
 def get_gpu_memory(gpu: int = 0) -> int:
     """Returns the total memory of the GPU in bytes."""
-    return torch.cuda.get_device_properties(gpu).total_memory
+    # return torch.cuda.get_device_properties(gpu).total_memory
+    return torch.xpu.get_device_properties(gpu).total_memory
 
 
 def get_cpu_memory() -> int:

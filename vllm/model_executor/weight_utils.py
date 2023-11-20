@@ -137,7 +137,8 @@ def prepare_hf_model_weights(
                                           allow_patterns=allow_patterns,
                                           cache_dir=cache_dir,
                                           tqdm_class=Disabledtqdm,
-                                          revision=revision)
+                                          revision=revision,
+                                          local_files_only=True)
     else:
         hf_folder = model_name_or_path
     hf_weights_files: List[str] = []
@@ -177,6 +178,7 @@ def hf_model_weights_iterator(
     cache_dir: Optional[str] = None,
     load_format: str = "auto",
     revision: Optional[str] = None,
+    device: str = "xpu"
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     use_safetensors = False
     use_np_cache = False
@@ -192,7 +194,8 @@ def hf_model_weights_iterator(
         use_np_cache = True
     else:
         raise ValueError(f"Unknown load_format: {load_format}")
-
+    print("cache dir is : ", cache_dir)
+    # cache_dir = "/workspace/huggingface/"
     hf_folder, hf_weights_files, use_safetensors = prepare_hf_model_weights(
         model_name_or_path,
         cache_dir=cache_dir,
@@ -244,7 +247,10 @@ def hf_model_weights_iterator(
             for name, param in state.items():
                 yield name, param
             del state
-            torch.cuda.empty_cache()
+            if device == "cuda":
+                torch.cuda.empty_cache()
+            elif device == "xpu":
+                torch.xpu.empty_cache()
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:

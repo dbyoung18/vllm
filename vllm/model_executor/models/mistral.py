@@ -296,7 +296,8 @@ class MistralForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
-                     revision: Optional[str] = None):
+                     revision: Optional[str] = None,
+                     device: str = "cuda"):
         if self.quant_config is None:
             col_weight_suffixes = ["weight"]
             row_weight_suffixes = ["weight"]
@@ -331,7 +332,7 @@ class MistralForCausalLM(nn.Module):
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+                model_name_or_path, cache_dir, load_format, revision, device):
             if "rotary_emb.inv_freq" in name:
                 continue
 

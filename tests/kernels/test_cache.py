@@ -2,8 +2,9 @@ import random
 
 import pytest
 import torch
+import intel_extension_for_pytorch
 
-from vllm import cache_ops
+# from vllm import cache_ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
@@ -52,6 +53,11 @@ def test_copy_blocks(
         dst1 = dst_blocks[2 * i]
         dst2 = dst_blocks[2 * i + 1]
         block_mapping[src] = [dst1, dst2]
+    mapping_for_tensor = []
+    for k, v in block_mapping.items():
+        for elem in v:
+            mapping_for_tensor.append((k, elem))
+    mapping_for_tensor = torch.Tensor(mapping_for_tensor).to(torch.int64).view(-1, 2)
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(num_blocks, block_size,
@@ -63,7 +69,8 @@ def test_copy_blocks(
     cloned_value_caches = [value_cache.clone() for value_cache in value_caches]
 
     # Call the copy blocks kernel.
-    cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+    # cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+    torch.ops.torch_ipex.copy_blocks(key_caches, value_caches, mapping_for_tensor)
 
     # Run the reference implementation.
     for src, dsts in block_mapping.items():
@@ -127,9 +134,10 @@ def test_reshape_and_cache(
     cloned_value_cache = value_cache.clone()
 
     # Call the reshape_and_cache kernel.
-    cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                slot_mapping)
-
+    # cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
+    #                             slot_mapping)
+    torch.ops.torch_ipex.reshap_and_cache(key, value, key_cache, value_cache,
+                            slot_mapping)
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
     block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")

@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 
-from vllm import layernorm_ops
+# from vllm import layernorm_ops
 
 
 class RMSNorm(nn.Module):
@@ -23,7 +23,11 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
-        layernorm_ops.rms_norm(
+        if x.device == "xpu":
+            rms_norm_op = torch.ops.torch_ipex.rms_norm
+        else:
+            rms_norm_op = layernorm_ops.rms_norm
+        rms_norm_op(
             out,
             x,
             self.weight.data,

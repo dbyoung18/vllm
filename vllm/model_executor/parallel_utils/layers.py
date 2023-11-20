@@ -10,6 +10,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
+import intel_extension_for_pytorch
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -40,8 +41,15 @@ class VocabParallelEmbedding(torch.nn.Module):
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
-                 params_dtype: Optional[torch.dtype] = None):
+                 params_dtype: Optional[torch.dtype] = None,
+                 device: str = "xpu"):
         super().__init__()
+        if device == "cuda":
+            self.current_device = torch.cuda.current_device()
+        elif device == "xpu":
+            self.current_device = torch.xpu.current_device()
+        else:
+            self.current_device = device
 
         # Keep the input dimensions.
         self.num_embeddings = num_embeddings
@@ -58,11 +66,11 @@ class VocabParallelEmbedding(torch.nn.Module):
                 self.tp_size))
         self.num_embeddings_per_partition = (self.vocab_end_index -
                                              self.vocab_start_index)
-
+        print("current device: ", self.current_device)
         self.weight = Parameter(
             torch.empty(self.num_embeddings_per_partition,
                         self.embedding_dim,
-                        device=torch.cuda.current_device(),
+                        device="xpu",
                         dtype=params_dtype))
 
     def forward(self, input_):
@@ -116,6 +124,7 @@ class ColumnParallelLinear(torch.nn.Module):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        device: str = "xpu",
     ):
         super().__init__()
 
@@ -128,6 +137,14 @@ class ColumnParallelLinear(torch.nn.Module):
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.skip_bias_add = skip_bias_add
         self.quant_config = quant_config
+        self.device = device
+        if device == "cuda":
+            self.current_device = torch.cuda.current_device()
+        elif device == "xpu":
+            self.current_device = "xpu"
+            # self.current_device = torch.xpu.current_device()
+        else:
+            self.current_device = device
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -140,7 +157,7 @@ class ColumnParallelLinear(torch.nn.Module):
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
-                            device=torch.cuda.current_device(),
+                            device=self.current_device,
                             dtype=params_dtype))
         else:
             self.register_parameter('bias', None)
@@ -149,7 +166,7 @@ class ColumnParallelLinear(torch.nn.Module):
         self.weight = Parameter(
             torch.empty(self.output_size_per_partition,
                         self.input_size,
-                        device=torch.cuda.current_device(),
+                        device=self.current_device,
                         dtype=dtype))
 
     def apply_weights(
@@ -221,6 +238,7 @@ class RowParallelLinear(torch.nn.Module):
         params_dtype: Optional[torch.dtype] = None,
         reduce_results: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
+        device: str = "xpu",
     ):
         super().__init__()
         # Keep input parameters
@@ -236,6 +254,13 @@ class RowParallelLinear(torch.nn.Module):
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.skip_bias_add = skip_bias_add
         self.quant_config = quant_config
+        self.device = device
+        if device == "cuda":
+            self.curent_device = torch.cuda.current_device()
+        elif device == "xpu":
+            self.current_device = "xpu"
+        else:
+            self.current_device = device
 
         self.create_weights(params_dtype)
 
@@ -246,7 +271,7 @@ class RowParallelLinear(torch.nn.Module):
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size,
-                            device=torch.cuda.current_device(),
+                            device=self.current_device,
                             dtype=params_dtype))
 
             # Always initialize bias to zero.
@@ -259,7 +284,7 @@ class RowParallelLinear(torch.nn.Module):
         self.weight = Parameter(
             torch.empty(self.output_size,
                         self.input_size_per_partition,
-                        device=torch.cuda.current_device(),
+                        device=self.current_device,
                         dtype=dtype))
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:

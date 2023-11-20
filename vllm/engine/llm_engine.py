@@ -87,6 +87,7 @@ class LLMEngine:
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
+        self.model_config.device = "xpu"
         self.cache_config = cache_config
         assert self.cache_config.sliding_window == getattr(
             self.model_config.hf_config, "sliding_window", None)

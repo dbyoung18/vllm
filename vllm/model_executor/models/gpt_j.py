@@ -145,6 +145,8 @@ class GPTJBlock(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         residual = hidden_states
+        # print(hidden_states.device)
+        # print(self.ln_1.weight.device)
         hidden_states = self.ln_1(hidden_states)
         attn_output = self.attn(
             position_ids=position_ids,
@@ -220,10 +222,17 @@ class GPTJForCausalLM(nn.Module):
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> SamplerOutput:
+        input_ids = input_ids.to("xpu")
+        # print("in the model")
+        # print("positions: ", positions)
+        # print("input_metadata: ", input_metadata)
+        self.transformer = self.transformer.to("xpu")
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
+        # print("hidden_states after transformers: ", hidden_states)
         next_tokens = self.sampler(self.lm_head.weight, hidden_states,
                                    input_metadata, self.lm_head.bias)
+        # print("next token: ", next_tokens)
         return next_tokens
 
     _column_parallel_weights = [
@@ -236,11 +245,12 @@ class GPTJForCausalLM(nn.Module):
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
                      load_format: str = "auto",
-                     revision: Optional[str] = None):
+                     revision: Optional[str] = None,
+                     device: str = "xpu"):
         tp_rank = get_tensor_model_parallel_rank()
         state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+                model_name_or_path, cache_dir, load_format, revision, device):
             if "attn.bias" in name or "attn.masked_bias" in name:
                 continue
 
@@ -266,3 +276,4 @@ class GPTJForCausalLM(nn.Module):
             load_tensor_parallel_weights(param, loaded_weight, name,
                                          self._column_parallel_weights,
                                          self._row_parallel_weights, tp_rank)
+            state_dict[name] = state_dict[name].to(device)

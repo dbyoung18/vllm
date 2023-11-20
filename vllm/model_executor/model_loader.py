@@ -71,7 +71,10 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         quant_config = get_quant_config(model_config.quantization,
                                         model_config.model,
                                         model_config.download_dir)
-        capability = torch.cuda.get_device_capability()
+        if model_config.device == 'cuda':
+            capability = torch.cuda.get_device_capability()
+        else:
+            capability = torch.xpu.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         if capability < quant_config.get_min_capability():
             raise ValueError(
@@ -94,13 +97,15 @@ def get_model(model_config: ModelConfig) -> nn.Module:
         else:
             model = model_class(model_config.hf_config)
         if model_config.load_format == "dummy":
-            model = model.cuda()
+            print("dummy weight")
+            model.to(model_config.device)
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
         else:
+            print("load model weight")
             # Load the weights from the cached or downloaded files.
             model.load_weights(model_config.model, model_config.download_dir,
-                               model_config.load_format, model_config.revision)
-            model = model.cuda()
+                               model_config.load_format, model_config.revision, model_config.device)
+            model = model.to(model_config.device)
     return model.eval()

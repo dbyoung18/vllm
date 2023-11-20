@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm import quantization_ops
+# from vllm import quantization_ops
 from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
                                                        RowParallelLinear)
 
@@ -16,7 +16,7 @@ class SqueezeLLMColumnParallelLinear(ColumnParallelLinear):
             torch.empty(
                 self.input_size // self.quant_config.pack_factor,
                 self.output_size_per_partition,
-                device="cuda",
+                device=self.device,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -25,7 +25,7 @@ class SqueezeLLMColumnParallelLinear(ColumnParallelLinear):
             torch.empty(
                 self.output_size_per_partition,
                 self.quant_config.weight_bits**2,
-                device="cuda",
+                device=self.device,
                 dtype=dtype,
             ),
             requires_grad=False,
@@ -39,7 +39,7 @@ class SqueezeLLMColumnParallelLinear(ColumnParallelLinear):
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
         # NOTE: The output tensor should be zero-initialized.
-        out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
+        out = torch.zeros(out_shape, device=self.device, dtype=torch.float16)
         quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
                                          self.lookup_table)
 
@@ -59,7 +59,7 @@ class SqueezeLLMRowParallelLinear(RowParallelLinear):
             torch.empty(
                 self.input_size_per_partition // self.quant_config.pack_factor,
                 self.output_size,
-                device="cuda",
+                device=self.device,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -68,7 +68,7 @@ class SqueezeLLMRowParallelLinear(RowParallelLinear):
             torch.empty(
                 self.output_size,
                 self.quant_config.weight_bits**2,
-                device="cuda",
+                device=self.device,
                 dtype=dtype,
             ),
             requires_grad=False,
@@ -78,7 +78,7 @@ class SqueezeLLMRowParallelLinear(RowParallelLinear):
         reshaped_x = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (self.qweight.shape[-1], )
         # NOTE: The output tensor should be zero-initialized.
-        out = torch.zeros(out_shape, device="cuda", dtype=torch.float16)
+        out = torch.zeros(out_shape, device=self.device, dtype=torch.float16)
         quantization_ops.squeezellm_gemm(reshaped_x, self.qweight, out,
                                          self.lookup_table)
         return out.reshape(out_shape)

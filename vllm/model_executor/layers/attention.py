@@ -6,9 +6,10 @@ import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
+import os
 
-from vllm import attention_ops
-from vllm import cache_ops
+# from vllm import attention_ops
+# from vllm import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.rotary_embedding import (
     DynamicNTKScalingRotaryEmbedding, LinearScalingRotaryEmbedding,
@@ -18,6 +19,119 @@ _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
 
+
+def page_attention_python(out, 
+                          query,                    # [num_seq, 1, num_heads, head_size]
+                          key_cache,                # [num_block, num_heads, head_size / x, block_size, x]
+                          value_cache,              # [num_block, num_heads, head_size, block_size]
+                          head_mapping, 
+                          scale, 
+                          block_tables,             # [num_seq, max_num_block_per_seq]
+                          context_lens, 
+                          block_size, 
+                          max_context_len, 
+                          alibi_slopes):
+    key_tensor = torch.index_select(key_cache, 0, block_tables.flatten())            #  [num_seq * max_num_block_per_seq, num_heads, head_size/x, block_size, x]
+    val_tensor = torch.index_select(value_cache, 0, block_tables.flatten())          #  [num_seq * max_num_block_per_seq, num_heads, head_size, block_size]
+    num_seq, max_num_block_per_seq = block_tables.size()
+    num_block, num_heads, head_size, block_size = value_cache.size()
+    x = key_cache.size(4)
+    # print("k tensor size: ", key_tensor.size())
+    # num_seq, max_num_block_per_seq, num_heads, head_size, block_size = val_tensor.size()
+    key_tensor = key_tensor.view([num_seq, max_num_block_per_seq, num_heads, head_size//x, block_size, x])
+    val_tensor = val_tensor.view([num_seq, max_num_block_per_seq, num_heads, head_size, block_size])
+    key_tensor = key_tensor.permute([0 ,1, 4, 2, 3, 5]).reshape([num_seq, max_num_block_per_seq * block_size, num_heads * head_size])
+    val_tensor = val_tensor.permute([0, 1, 4, 2, 3]).reshape([num_seq, max_num_block_per_seq * block_size, num_heads * head_size])
+    query = query.view([num_seq, 1, num_heads * head_size])
+    qk = torch.bmm(query, key_tensor.transpose(1, 2))                               #  [num_seq, 1, max_block_per_seq * block_size]
+    mask = torch.zeros([num_seq, 1, max_num_block_per_seq * block_size]).fill_(-65536)
+    for i in range(num_seq):
+        seq_len = context_lens[i]
+        # print("seq len: ", context_lens[i])
+        mask[:, :, 0:seq_len] = 0
+    mask = mask.to("xpu")
+    qk = (qk + mask) * scale
+    qk_softmax = torch.softmax(qk, dim=-1).contiguous().to(val_tensor.dtype)
+    val_tensor = val_tensor.contiguous()
+    torch.bmm(qk_softmax, val_tensor, out=out)
+
+def ref_masked_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    scale: float,
+    attn_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
+    if attn_mask is not None:
+        attn_weights = attn_weights + attn_mask.float()
+    attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
+    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
+    return out
+
+
+def construct_head_map(input_metadata:InputMetadata):
+    prompt_lens = input_metadata.prompt_lens
+    num_prompt = input_metadata.num_prompts
+    head_mask = torch.empty([num_prompt, 2048], dtype=torch.float16, device="cpu").fill_(-65504.)
+    for i, length in enumerate(prompt_lens):
+        head_mask[i][:length] = 0
+    return head_mask.to("xpu")
+
+def ref_single_query_cached_kv_attention(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    num_queries_per_kv: int,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    context_lens: torch.Tensor,
+    scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+) -> None:
+    num_query_heads = query.shape[1]
+    num_kv_heads = value_cache.shape[1]
+    head_size = value_cache.shape[2]
+    block_size = value_cache.shape[3]
+    num_seqs = query.shape[0]
+
+    block_tables = block_tables.cpu().tolist()
+    context_lens = context_lens.cpu().tolist()
+    for i in range(num_seqs):
+        q = query[i].unsqueeze(0)
+        block_table = block_tables[i]
+        context_len = int(context_lens[i])
+
+        keys = []
+        values = []
+        for j in range(context_len):
+            block_number = int(block_table[j // block_size])
+            block_offset = j % block_size
+
+            k = key_cache[block_number, :, :, block_offset, :]
+            k = k.reshape(num_kv_heads, head_size)
+            keys.append(k)
+
+            v = value_cache[block_number, :, :, block_offset]
+            values.append(v)
+        keys = torch.stack(keys, dim=0)
+        values = torch.stack(values, dim=0)
+        if num_queries_per_kv > 1:
+            # Handle MQA and GQA
+            keys = torch.repeat_interleave(keys, num_queries_per_kv, dim=1)
+            values = torch.repeat_interleave(values, num_queries_per_kv, dim=1)
+
+        alibi_bias = None
+        if alibi_slopes is not None:
+            # Create the ALiBi bias used in the paged attention kernel.
+            position_ids = torch.arange(context_len, device="cuda").int()
+            alibi_bias = (position_ids - context_len + 1).float()
+            alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
+                1, 1, -1)
+
+        out = ref_masked_attention(q, keys, values, scale, alibi_bias)
+        out = out.view(num_query_heads, head_size)
+        output[i].copy_(out, non_blocking=True)
 
 class PagedAttention(nn.Module):
     # pylint: disable=line-too-long
@@ -45,18 +159,20 @@ class PagedAttention(nn.Module):
                  head_size: int,
                  scale: float,
                  num_kv_heads: Optional[int] = None,
-                 sliding_window: Optional[int] = None) -> None:
+                 sliding_window: Optional[int] = None,
+                 device: str = "xpu") -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
+        self.device = device
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.head_mapping = torch.repeat_interleave(
-            torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
+            torch.arange(self.num_kv_heads, dtype=torch.int32, device=device),
             self.num_queries_per_kv)
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
@@ -104,16 +220,35 @@ class PagedAttention(nn.Module):
                                             dim=1)
 
         # TODO(woosuk): The unsqueeze op may incur some CPU overhead. Optimize.
-        out = xops.memory_efficient_attention_forward(
-            query.unsqueeze(0),
-            key.unsqueeze(0),
-            value.unsqueeze(0),
-            attn_bias=input_metadata.attn_bias,
-            p=0.0,
-            scale=self.scale,
-        )
+        # if output.device == torch.device("xpu"):
+        query = query.contiguous().transpose(0, 1)
+        key = key.contiguous().transpose(0, 1)
+        value = value.contiguous().transpose(0, 1)
+        attn_mask = construct_head_map(input_metadata)
+        num_prompt = query.size(0)
+        # print("q: ", query)
+        # print("k: ", key)
+        # print("v: ", value)
+        # print("query size: ", query.size(), query.stride())
+        # print("key size: ", key.size(), key.stride())
+        # print("value size: ", value.size(), value.stride())
+        # print("input meta: ", input_metadata)
+        # print("input_meta: ", input_metadata.attn_bias.materialize([num_prompt, num_prompt], dtype=query.dtype, device=query.device))
+
+        out = torch.xpu.IpexSDP(query.unsqueeze(0), key.unsqueeze(0), value.unsqueeze(0), None, attn_mask, None, self.scale, 1.0, 0.0, True)
+        # print("out: ", out)
+        # print("out size: ", out.size())
+        # else:
+        #     out = xops.memory_efficient_attention_forward(
+        #         query.unsqueeze(0),
+        #         key.unsqueeze(0),
+        #         value.unsqueeze(0),
+        #         attn_bias=input_metadata.attn_bias,
+        #         p=0.0,
+        #         scale=self.scale,
+        #     )
         # TODO(woosuk): Unnecessary copy. Optimize.
-        output.copy_(out.squeeze(0))
+        output.copy_(out.transpose(1, 2).squeeze(0))
         return output
 
     def get_alibi_slopes(self) -> Optional[torch.Tensor]:
@@ -159,19 +294,22 @@ class PagedAttention(nn.Module):
         use_v1 = max_num_partitions == 1 or num_seqs * num_heads > 512
         if use_v1:
             # Run PagedAttention V1.
-            attention_ops.paged_attention_v1(
-                output,
-                query,
-                key_cache,
-                value_cache,
-                self.head_mapping,
-                self.scale,
-                input_metadata.block_tables,
-                input_metadata.context_lens,
-                block_size,
-                input_metadata.max_context_len,
-                alibi_slopes,
-            )
+            # attention_ops.paged_attention_v1(
+            #     output,
+            #     query,
+            #     key_cache,
+            #     value_cache,
+            #     self.head_mapping,
+            #     self.scale,
+            #     input_metadata.block_tables,
+            #     input_metadata.context_lens,
+            #     block_size,
+            #     input_metadata.max_context_len,
+            #     alibi_slopes,
+            # )
+            # ref_single_query_cached_kv_attention(output, query, 1, key_cache, value_cache, )
+            page_attention_python(output, query, key_cache, value_cache, self.head_mapping,
+                                  self.scale, input_metadata.block_tables, input_metadata.context_lens, block_size, input_metadata.max_context_len, alibi_slopes)
         else:
             # Run PagedAttention V2.
             assert _PARTITION_SIZE % block_size == 0
@@ -239,7 +377,7 @@ class PagedAttention(nn.Module):
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
         # Pre-allocate the output tensor.
-        output = torch.empty_like(query)
+        output = torch.empty_like(query).to("xpu")
 
         # Compute the attention op for prompts.
         num_prompt_tokens = input_metadata.num_prompt_tokens
@@ -270,8 +408,12 @@ class PagedAttention(nn.Module):
                 key_to_cache = key_to_cache[input_metadata.to_cache]
                 value_to_cache = value_to_cache[input_metadata.to_cache]
                 slot_mapping = slot_mapping[input_metadata.to_cache]
-
-            cache_ops.reshape_and_cache(
+            reshape_and_cache_op = None
+            if self.device == "xpu":
+                reshape_and_cache_op = torch.ops.torch_ipex.reshape_and_cache
+            else:
+                reshape_and_cache_op = cache_ops.reshape_and_cache
+            reshape_and_cache_op(
                 key_to_cache,
                 value_to_cache,
                 key_cache,
@@ -286,6 +428,7 @@ class PagedAttention(nn.Module):
                 "key_cache and value_cache must be provided when "
                 "generating tokens.")
             # Compute the attention op for generation tokens.
+            # print('before page attention')
             self.single_query_cached_kv_attention(output, query, key_cache,
                                                   value_cache, input_metadata,
                                                   self.get_alibi_slopes())

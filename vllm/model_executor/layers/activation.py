@@ -1,8 +1,8 @@
 """Custom activation functions."""
 import torch
 import torch.nn as nn
-
-from vllm import activation_ops
+import intel_extension_for_pytorch
+# from vllm import activation_ops
 
 
 class SiluAndMul(nn.Module):
@@ -19,7 +19,8 @@ class SiluAndMul(nn.Module):
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        activation_ops.silu_and_mul(out, x)
+        # activation_ops.silu_and_mul(out, x)
+        out = torch.nn.functional.silu(out) * x
         return out
 
 
@@ -27,7 +28,8 @@ class NewGELU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
-        activation_ops.gelu_new(out, x)
+        # activation_ops.gelu_new(out, x)
+        torch.nn.functional.gelu(out, approximate="tanh")
         return out
 
 
@@ -35,7 +37,8 @@ class FastGELU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
-        activation_ops.gelu_fast(out, x)
+        # activation_ops.gelu_fast(out, x)
+        torch.nn.functional.gelu(out, approximate="erf")
         return out
 
 

@@ -37,6 +37,7 @@ class ModelConfig:
         dtype: Data type for model weights and activations. The "auto" option
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
+        device: The device model will run on.
         seed: Random seed for reproducibility.
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id. If unspecified, will use the default
@@ -60,6 +61,7 @@ class ModelConfig:
         load_format: str,
         dtype: str,
         seed: int,
+        device: str = "xpu",
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
@@ -75,6 +77,7 @@ class ModelConfig:
         self.revision = revision
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
+        self.device = device
 
         self.hf_config = get_config(model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)

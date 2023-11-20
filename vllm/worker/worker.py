@@ -3,7 +3,10 @@ import os
 from typing import Dict, List, Tuple, Optional
 
 import torch
-import torch.distributed
+import torch.distributed 
+import intel_extension_for_pytorch
+import oneccl_bindings_for_pytorch
+
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -14,6 +17,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
+import intel_extension_for_pytorch
 
 
 class Worker:
@@ -31,12 +35,15 @@ class Worker:
         scheduler_config: SchedulerConfig,
         rank: Optional[int] = None,
         distributed_init_method: Optional[str] = None,
+        device: str = "xpu",
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.device_ = device
+        self.set_device_related_apis()
 
         # Uninitialized cache engine. Will be initialized by
         # self.init_cache_engine().
@@ -46,6 +53,20 @@ class Worker:
         self.cache_engine = None
         self.cache_events = None
         self.gpu_cache = None
+    
+    def set_device_related_apis(self):
+        if self.device_ == "cuda":
+            self.set_device = torch.cuda.set_device
+            self.empty_cache = torch.cuda.empty_cache
+            self.reset_peak_memory_stats = torch.cuda.reset_peak_memory_stats
+            self.synchronize = torch.cuda.synchronize
+            self.max_memory_allocated = torch.cuda.max_memory_allocated
+        else:
+            self.set_device = torch.xpu.set_device
+            self.empty_cache = torch.xpu.empty_cache
+            self.reset_peak_memory_stats = torch.xpu.reset_peak_memory_stats
+            self.synchronize = torch.xpu.synchronize
+            self.max_memory_allocated = torch.xpu.max_memory_allocated
 
     def init_model(self):
         # This env var set by Ray causes exceptions with graph building.
@@ -54,10 +75,10 @@ class Worker:
         self.rank = self.rank if self.rank is not None else int(
             os.getenv("RANK", "-1"))
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        self.device = torch.device(f"cuda:{local_rank}")
+        self.device = torch.device(f"{self.device_}:{local_rank}")
         if self.rank < 0:
             raise ValueError("Invalid or unspecified rank.")
-        torch.cuda.set_device(self.device)
+        self.set_device(self.device)
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 
@@ -66,7 +87,7 @@ class Worker:
                                       self.distributed_init_method)
 
         # Initialize the model.
-        set_random_seed(self.model_config.seed)
+        set_random_seed(self.model_config.seed, self.model_config.device)
         self.model = get_model(self.model_config)
 
     @torch.inference_mode()
@@ -78,8 +99,8 @@ class Worker:
     ) -> Tuple[int, int]:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+        self.empty_cache()
+        self.reset_peak_memory_stats()
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
@@ -108,18 +129,18 @@ class Worker:
 
         # Execute the model.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        self.model(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=[(None, None)] * num_layers,
-            input_metadata=input_metadata,
-            cache_events=None,
-        )
+        # self.model(
+        #     input_ids=input_tokens,
+        #     positions=input_positions,
+        #     kv_caches=[(None, None)] * num_layers,
+        #     input_metadata=input_metadata,
+        #     cache_events=None,
+        # )
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        torch.cuda.synchronize()
-        peak_memory = torch.cuda.max_memory_allocated()
+        self.synchronize()
+        peak_memory = self.max_memory_allocated()
         total_gpu_memory = get_gpu_memory()
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, self.model_config, self.parallel_config)
@@ -129,11 +150,11 @@ class Worker:
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
-        torch.cuda.empty_cache()
+        self.empty_cache()
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        set_random_seed(self.model_config.seed, self.model_config.device)
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
@@ -262,19 +283,19 @@ class Worker:
         # Convert to tensors.
         tokens_tensor = torch.tensor(padded_input_tokens,
                                      dtype=torch.long,
-                                     device="cuda")
+                                     device=self.device_)
         positions_tensor = torch.tensor(padded_input_positions,
                                         dtype=torch.long,
-                                        device="cuda")
+                                        device=self.device_)
         slot_mapping_tensor = torch.tensor(padded_slot_mapping,
                                            dtype=torch.int,
-                                           device="cuda")
+                                           device=self.device_)
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
-                                           device="cuda")
+                                           device=self.device_)
         block_tables_tensor = torch.tensor(padded_block_tables,
                                            dtype=torch.int,
-                                           device="cuda")
+                                           device=self.device_)
 
         seq_data: Dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
@@ -327,7 +348,6 @@ class Worker:
         # Prepare input tensors.
         input_tokens, input_positions, input_metadata = self._prepare_inputs(
             seq_group_metadata_list)
-
         # Execute the model.
         output = self.model(
             input_ids=input_tokens,
@@ -343,7 +363,12 @@ def _init_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
+    device: str = "xpu",
 ) -> None:
+    if device == "xpu":
+        backend = "ccl"
+    else:
+        backend = "nccl"
     """Initialize the distributed environment."""
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
@@ -358,14 +383,14 @@ def _init_distributed_environment(
             "is not already initialized")
     else:
         torch.distributed.init_process_group(
-            backend="nccl",
+            backend=backend,
             world_size=parallel_config.world_size,
             rank=rank,
             init_method=distributed_init_method,
         )
 
     # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda())
+    # torch.distributed.all_reduce(torch.zeros(1).to("xpu"))
     initialize_model_parallel(parallel_config.tensor_parallel_size,
                               parallel_config.pipeline_parallel_size)
 
@@ -379,7 +404,8 @@ def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
 
 
 def _check_if_can_support_max_seq_len(max_seq_len: int,
-                                      block_size: int) -> None:
+                                      block_size: int,
+                                      device: str = "xpu") -> None:
     # Follows the logic in
     # attention_kernels.cu::single_query_cached_kv_attention_launcher
     max_shared_mem = get_max_shared_memory_bytes()
@@ -388,22 +414,26 @@ def _check_if_can_support_max_seq_len(max_seq_len: int,
         (max_seq_len + block_size - 1) / block_size) * block_size
     # padded_max_seq_len + extra buffer
     required_shared_mem = (padded_max_seq_len + 512) * float32_bytes
+    if device == "xpu":
+        device_capability = torch.xpu.get_device_capability()
+    else:
+        device_capability = torch.cuda.get_device_capability()
     if padded_max_seq_len * float32_bytes > max_shared_mem:
         raise RuntimeError(
             f"vLLM cannot currently support max_model_len={max_seq_len} "
             f"with block_size={block_size} on GPU with compute "
-            f"capability {torch.cuda.get_device_capability()} "
+            f"capability {device_capability} "
             f"(required shared memory {required_shared_mem} > "
             f"available shared memory {max_shared_mem}). "
             "This will be fixed in a future release.")
 
 
-def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
+def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype, device: str = "xpu"):
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:
-        compute_capability = torch.cuda.get_device_capability()
+        compute_capability = torch.xpu.get_device_capability() if device == "xpu" else torch.cuda.get_device_capability()
         if compute_capability[0] < 8:
-            gpu_name = torch.cuda.get_device_name()
+            gpu_name = torch.xpu.get_device_name() if device == "xpu" else torch.cuda.get_device_name()
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "

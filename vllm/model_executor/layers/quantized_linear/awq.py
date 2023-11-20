@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm import quantization_ops
+# from vllm import quantization_ops
 from vllm.model_executor.parallel_utils.layers import (ColumnParallelLinear,
                                                        RowParallelLinear)
 
@@ -21,7 +21,7 @@ class AWQColumnParallelLinear(ColumnParallelLinear):
                 self.input_size,
                 self.output_size_per_partition //
                 self.quant_config.pack_factor,
-                device="cuda",
+                device=self.device,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -31,7 +31,7 @@ class AWQColumnParallelLinear(ColumnParallelLinear):
                 self.input_size // self.quant_config.group_size,
                 self.output_size_per_partition //
                 self.quant_config.pack_factor,
-                device="cuda",
+                device=self.device,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -40,7 +40,7 @@ class AWQColumnParallelLinear(ColumnParallelLinear):
             torch.empty(
                 self.input_size // self.quant_config.group_size,
                 self.output_size_per_partition,
-                device="cuda",
+                device=self.device,
                 dtype=dtype,
             ),
             requires_grad=False,
@@ -73,7 +73,7 @@ class AWQRowParallelLinear(RowParallelLinear):
             torch.empty(
                 self.input_size_per_partition,
                 self.output_size // self.quant_config.pack_factor,
-                device="cuda",
+                device=self.device,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -82,7 +82,7 @@ class AWQRowParallelLinear(RowParallelLinear):
             torch.empty(
                 self.input_size_per_partition // self.quant_config.group_size,
                 self.output_size // self.quant_config.pack_factor,
-                device="cuda",
+                device=self.device,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -91,7 +91,7 @@ class AWQRowParallelLinear(RowParallelLinear):
             torch.empty(
                 self.input_size_per_partition // self.quant_config.group_size,
                 self.output_size,
-                device="cuda",
+                device=self.device,
                 dtype=dtype,
             ),
             requires_grad=False,
