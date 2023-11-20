@@ -27,7 +27,9 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm._C import ops
+from accelerator import get_accelerator
+if get_accelerator().device_name() == "cuda":
+    from vllm._C import ops
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -77,7 +79,7 @@ class RotaryEmbedding(nn.Module):
         # create the cache on GPU for faster initialization. This may cause
         # a slight numerical difference between the HF implementation and ours.
         inv_freq = 1.0 / (base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float, device="cuda") /
+            0, self.rotary_dim, 2, dtype=torch.float, device=get_accelerator().device_name()) /
                                  self.rotary_dim))
         return inv_freq
 
@@ -86,7 +88,7 @@ class RotaryEmbedding(nn.Module):
         inv_freq = self._compute_inv_freq(self.base)
         t = torch.arange(self.max_position_embeddings,
                          dtype=torch.float,
-                         device="cuda")
+                         device=get_accelerator().device_name())
 
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
@@ -141,10 +143,30 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # ops.rotary_embedding() is an in-place operation that
-        # updates the query and key tensors.
-        ops.rotary_embedding(positions, query, key, self.head_size,
-                             self.cos_sin_cache, self.is_neox_style)
+        if get_accelerator().device_name() == "xpu":
+            origin_size = query.size()
+            emb_size = self.cos_sin_cache.size(1) // 2
+            sin, cos = torch.split(self.cos_sin_cache, self.cos_sin_cache.shape[-1] // 2, dim=-1)
+            sin = torch.repeat_interleave(sin, 2, 1).to(torch.float).to(get_accelerator().current_device_name())
+            cos = torch.repeat_interleave(cos, 2, 1).to(torch.float).to(get_accelerator().current_device_name())
+            sin = sin[positions].unsqueeze(2)
+            cos = cos[positions].unsqueeze(2)
+            query = query.view(query.size(0), query.size(1), query.size(2)//self.head_size, self.head_size)
+            key = key.view(key.size(0), key.size(1), key.size(2)//self.head_size, self.head_size)
+            torch.ops.torch_ipex.apply_rotary_embedding_two_qk(
+                query[:, :, :, :self.rotary_dim],
+                key[:, :, :, :self.rotary_dim],
+                sin, cos,
+                query[:, :, :, :self.rotary_dim],
+                key[:, :, :, :self.rotary_dim]
+            )
+            query = query.view(origin_size)
+            key = key.view(origin_size)
+        else:
+            # ops.rotary_embedding() is an in-place operation that
+            # updates the query and key tensors.
+            ops.rotary_embedding(positions, query, key, self.head_size,
+                                self.cos_sin_cache, self.is_neox_style)
         return query, key
 
 
@@ -174,7 +196,7 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
         # Thus, the maximum length after applying the rope scaling is
         # self.max_position_embeddings * self.scaling_factor.
         max_len = self.max_position_embeddings * self.scaling_factor
-        t = torch.arange(max_len, dtype=torch.float, device="cuda")
+        t = torch.arange(max_len, dtype=torch.float, device=get_accelerator().device_name())
         t = t / self.scaling_factor
 
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
@@ -214,7 +236,7 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
             (self.scaling_factor - 1))**(self.rotary_dim /
                                          (self.rotary_dim - 2))
         inv_freq = self._compute_inv_freq(base)
-        t = torch.arange(max_len, dtype=torch.float, device="cuda")
+        t = torch.arange(max_len, dtype=torch.float, device=get_accelerator().device_name())
 
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
@@ -298,7 +320,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
         pos_freqs = self.base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float, device="cuda") /
+            0, self.rotary_dim, 2, dtype=torch.float, device=get_accelerator().device_name()) /
                                 self.rotary_dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
@@ -309,7 +331,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         # Get n-d rotational scaling corrected for extrapolation
         inv_freq_mask = (1 - _yarn_linear_ramp_mask(
             low, high, self.rotary_dim // 2, dtype=torch.float,
-            device="cuda")) * self.extrapolation_factor
+            device=get_accelerator().device_name())) * self.extrapolation_factor
         inv_freq = inv_freq_interpolation * (
             1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
@@ -317,7 +339,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(self.max_position_embeddings * self.scaling_factor,
-                         device="cuda",
+                         device=get_accelerator().device_name(),
                          dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = (freqs.cos() * self.mscale)

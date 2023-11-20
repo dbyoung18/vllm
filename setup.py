@@ -8,7 +8,6 @@ import warnings
 from packaging.version import parse, Version
 import setuptools
 import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
 
@@ -17,6 +16,7 @@ MAIN_CUDA_VERSION = "12.1"
 # Supported NVIDIA GPU architectures.
 NVIDIA_SUPPORTED_ARCHS = {"7.0", "7.5", "8.0", "8.6", "8.9", "9.0"}
 ROCM_SUPPORTED_ARCHS = {"gfx90a", "gfx908", "gfx906", "gfx1030", "gfx1100"}
+ONEAPI_SUPPORTED_ARCHS = {"pvc"}
 # SUPPORTED_ARCHS = NVIDIA_SUPPORTED_ARCHS.union(ROCM_SUPPORTED_ARCHS)
 
 
@@ -36,6 +36,18 @@ def _is_neuron() -> bool:
 def _is_cuda() -> bool:
     return (torch.version.cuda is not None) and not _is_neuron()
 
+
+def _is_xpu() -> bool:
+    try:
+        import intel_extension_for_pytorch as ipex
+    except ImportError as e:
+        raise ValueError(
+            f"XPU requires intel_extension_for_pytorch, which is not installed on this system.")
+    return torch.xpu is not None
+
+
+if not _is_xpu():
+    from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
 
 # Compiler flags.
 CXX_FLAGS = ["-g", "-O2", "-std=c++17"]
@@ -114,6 +126,16 @@ def get_neuronxcc_version():
         raise RuntimeError("Could not find HIP version in the output")
 
 
+def get_intelxpu_offload_arch():
+    result = "pvc"
+    return result
+
+
+def get_oneapi_version():
+    oneapi_version = "2024.0"
+    return oneapi_version
+
+
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
     """Get the CUDA version from nvcc.
 
@@ -166,7 +188,8 @@ def get_torch_arch_list() -> Set[str]:
 
 
 # First, check the TORCH_CUDA_ARCH_LIST environment variable.
-compute_capabilities = get_torch_arch_list()
+if not _is_xpu():
+    compute_capabilities = get_torch_arch_list()
 if _is_cuda() and not compute_capabilities:
     # If TORCH_CUDA_ARCH_LIST is not defined or empty, target all available
     # GPUs on the current machine.
@@ -240,24 +263,32 @@ elif _is_hip():
 elif _is_neuron():
     neuronxcc_version = get_neuronxcc_version()
 
+elif _is_xpu():
+    intel_arch = get_intelxpu_offload_arch()
+    if intel_arch not in ONEAPI_SUPPORTED_ARCHS:
+        raise RuntimeError(
+            f"Only the following arch is supported: {ONEAPI_SUPPORTED_ARCHS}"
+            f"intelgpu_arch_found: {intel_arch}")
+
 ext_modules = []
 
-vllm_extension_sources = [
-    "csrc/cache_kernels.cu",
-    "csrc/attention/attention_kernels.cu",
-    "csrc/pos_encoding_kernels.cu",
-    "csrc/activation_kernels.cu",
-    "csrc/layernorm_kernels.cu",
-    "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
-    "csrc/quantization/gptq/q_gemm.cu",
-    "csrc/cuda_utils_kernels.cu",
-    "csrc/pybind.cpp",
-]
+if not _is_xpu():
+    vllm_extension_sources = [
+        "csrc/cache_kernels.cu",
+        "csrc/attention/attention_kernels.cu",
+        "csrc/pos_encoding_kernels.cu",
+        "csrc/activation_kernels.cu",
+        "csrc/layernorm_kernels.cu",
+        "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
+        "csrc/quantization/gptq/q_gemm.cu",
+        "csrc/cuda_utils_kernels.cu",
+        "csrc/pybind.cpp",
+    ]
 
 if _is_cuda():
     vllm_extension_sources.append("csrc/quantization/awq/gemm_kernels.cu")
 
-if not _is_neuron():
+if not _is_neuron() and not _is_xpu():
     vllm_extension = CUDAExtension(
         name="vllm._C",
         sources=vllm_extension_sources,
@@ -301,6 +332,11 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"+neuron{neuron_version_str}"
+    elif _is_xpu():
+        # Get the oneAPI version
+        oneapi_version = get_oneapi_version()
+        if oneapi_version != MAIN_CUDA_VERSION:
+            version += f"+oneapi{oneapi_version}"
     else:
         cuda_version = str(nvcc_cuda_version)
         if cuda_version != MAIN_CUDA_VERSION:
@@ -326,6 +362,9 @@ def get_requirements() -> List[str]:
             requirements = f.read().strip().split("\n")
     elif _is_neuron():
         with open(get_path("requirements-neuron.txt")) as f:
+            requirements = f.read().strip().split("\n")
+    elif _is_xpu():
+        with open(get_path("requirements-xpu.txt")) as f:
             requirements = f.read().strip().split("\n")
     else:
         with open(get_path("requirements.txt")) as f:
@@ -365,6 +404,6 @@ setuptools.setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension} if not _is_neuron() else {},
+    cmdclass={"build_ext": BuildExtension} if not _is_neuron() and not _is_xpu() else {},
     package_data=package_data,
 )

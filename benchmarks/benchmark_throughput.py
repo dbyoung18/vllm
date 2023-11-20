@@ -10,6 +10,8 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 from tqdm import tqdm
 
+from accelerator import get_accelerator
+
 
 def sample_requests(
     dataset_path: str,
@@ -124,7 +126,7 @@ def run_hf(
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
-    llm = llm.cuda()
+    llm = llm.to(get_accelerator().current_device())
 
     pbar = tqdm(total=len(requests))
     start = time.perf_counter()
@@ -149,7 +151,7 @@ def run_hf(
         input_ids = tokenizer(batch, return_tensors="pt",
                               padding=True).input_ids
         llm_outputs = llm.generate(
-            input_ids=input_ids.cuda(),
+            input_ids=input_ids.to(get_accelerator().current_device()),
             do_sample=not use_beam_search,
             num_return_sequences=n,
             temperature=1.0,

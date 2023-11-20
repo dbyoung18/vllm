@@ -6,7 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm._C import ops
+from accelerator import get_accelerator
+if get_accelerator().device_name() == "cuda":
+    from vllm._C import ops
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
@@ -33,7 +35,10 @@ class SiluAndMul(nn.Module):
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        ops.silu_and_mul(out, x)
+        if get_accelerator().device_name() == "xpu":
+            out = torch.nn.functional.silu(out) * x
+        else:
+            ops.silu_and_mul(out, x)
         return out
 
 
@@ -47,7 +52,10 @@ class NewGELU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
-        ops.gelu_new(out, x)
+        if get_accelerator().device_name() == "xpu":
+            out = torch.nn.functional.gelu(x, approximate="tanh")
+        else:
+            ops.gelu_new(out, x)
         return out
 
 
@@ -60,7 +68,10 @@ class FastGELU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)
-        ops.gelu_fast(out, x)
+        if get_accelerator().device_name() == "xpu":
+            out = torch.nn.functional.gelu(out, approximate="erf")
+        else:
+            ops.gelu_fast(out, x)
         return out
 
 
@@ -91,7 +102,7 @@ class ScaledActivation(nn.Module):
         self.scales = nn.Parameter(
             torch.empty(intermediate_size_per_partition,
                         dtype=params_dtype,
-                        device="cuda"))
+                        device=get_accelerator().device_name()))
         set_weight_attrs(self.scales, {"weight_loader": self.weight_loader})
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

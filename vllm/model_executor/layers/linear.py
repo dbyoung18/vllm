@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from accelerator import get_accelerator
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -54,7 +55,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        params_dtype: torch.dtype) -> Dict[str, Any]:
         weight = Parameter(torch.empty(output_size_per_partition,
                                        input_size_per_partition,
-                                       device=torch.cuda.current_device(),
+                                       device=get_accelerator().device_name(),
                                        dtype=params_dtype),
                            requires_grad=False)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
@@ -114,7 +115,7 @@ class ReplicatedLinear(torch.nn.Module):
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size,
-                            device=torch.cuda.current_device(),
+                            device=get_accelerator().device_name(),
                             dtype=self.params_dtype))
             set_weight_attrs(self.bias, {"output_dim": 0})
         else:
@@ -183,7 +184,7 @@ class ColumnParallelLinear(torch.nn.Module):
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
-                            device=torch.cuda.current_device(),
+                            device=get_accelerator().device_name(),
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
@@ -510,7 +511,7 @@ class RowParallelLinear(torch.nn.Module):
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size,
-                            device=torch.cuda.current_device(),
+                            device=get_accelerator().device_name(),
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,

@@ -373,7 +373,7 @@ def _sample(
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
     for sampling_type in SamplingType:
-        sample_indices = categorized_sample_indices[sampling_type]
+        sample_indices = categorized_sample_indices[sampling_type].to(torch.int64)
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue

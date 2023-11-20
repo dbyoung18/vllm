@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.distributed
 
+from accelerator import get_accelerator
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.model_executor import set_random_seed
@@ -15,6 +16,7 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
+from vllm.utils import get_gpu_memory
 
 
 class Worker:
@@ -61,12 +63,16 @@ class Worker:
         # this behavior.
         # Related issue:
         # https://discuss.pytorch.org/t/cuda-allocation-lifetime-for-inputs-to-distributed-all-reduce/191573
-        os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
+        if get_accelerator().device_name() == "cuda":
+            os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
 
-        # This env var set by Ray causes exceptions with graph building.
-        os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
+            # This env var set by Ray causes exceptions with graph building.
+            os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+
+            # This env var set by Ray causes exceptions with graph building.
+            os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+        self.device = get_accelerator().current_device()
+        get_accelerator().set_device(self.device)
 
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 
@@ -97,7 +103,7 @@ class Worker:
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        torch.cuda.empty_cache()
+        get_accelerator().empty_cache()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -105,10 +111,13 @@ class Worker:
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        torch.cuda.synchronize()
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        peak_memory = total_gpu_memory - free_gpu_memory
-
+        get_accelerator().synchronize()
+        if get_accelerator().device_name() == "xpu":
+            peak_memory = get_accelerator().max_memory_allocated()
+            total_gpu_memory = get_gpu_memory()
+        else:
+            free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+            peak_memory = total_gpu_memory - free_gpu_memory
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, self.model_config, self.parallel_config)
         num_gpu_blocks = int(
@@ -117,7 +126,7 @@ class Worker:
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
-        torch.cuda.empty_cache()
+        get_accelerator().empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
     def init_cache_engine(self, cache_config: CacheConfig) -> None:
@@ -219,14 +228,15 @@ def _init_distributed_environment(
             "is not already initialized")
     else:
         torch.distributed.init_process_group(
-            backend="nccl",
+            backend=get_accelerator().communication_backend_name(),
             world_size=parallel_config.world_size,
             rank=rank,
             init_method=distributed_init_method,
         )
 
     # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda())
+    if get_accelerator().current_device() == "cuda":
+        torch.distributed.all_reduce(torch.zeros(1).to(get_accelerator().current_device()))
     initialize_model_parallel(parallel_config.tensor_parallel_size,
                               parallel_config.pipeline_parallel_size)
 
@@ -234,9 +244,9 @@ def _init_distributed_environment(
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:
-        compute_capability = torch.cuda.get_device_capability()
+        compute_capability = get_accelerator().device_capability()
         if compute_capability[0] < 8:
-            gpu_name = torch.cuda.get_device_name()
+            gpu_name = get_accelerator().device_name()
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "

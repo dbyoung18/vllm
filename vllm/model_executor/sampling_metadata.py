@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from accelerator import get_accelerator
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData
 from vllm.utils import in_wsl
@@ -152,7 +153,7 @@ class SamplingTensors:
                    dtype: torch.dtype) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
-        pin_memory = not in_wsl()
+        pin_memory = not in_wsl() and (get_accelerator().device_name() == "cuda")
         prompt_max_len = max(len(tokens) for tokens in prompt_tokens)
         prompt_padded_tokens = [
             tokens + [vocab_size] * (prompt_max_len - len(tokens))

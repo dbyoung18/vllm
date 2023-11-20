@@ -1,14 +1,17 @@
 """Multi-head attention."""
 from typing import List, Optional
 
+import math
 import torch
 import torch.nn as nn
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
-from vllm._C import ops
-from vllm._C import cache_ops
+from accelerator import get_accelerator
+if get_accelerator().device_name() == "cuda":
+    from vllm._C import ops
+    from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
@@ -17,6 +20,15 @@ from vllm.utils import is_hip
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
+
+
+def construct_head_map(input_metadata:InputMetadata):
+    prompt_lens = input_metadata.prompt_lens
+    num_prompt = len(prompt_lens)
+    head_mask = torch.empty([num_prompt, 2048], dtype=torch.float16, device="cpu").fill_(-65504.)
+    for i, length in enumerate(prompt_lens):
+        head_mask[i][:length] = 0
+    return head_mask.to("xpu")
 
 
 class PagedAttention(nn.Module):
@@ -92,13 +104,22 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
-            cache_ops.reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                input_metadata.slot_mapping.flatten(),
-            )
+            if get_accelerator().device_name() == "xpu":
+                torch.ops.torch_ipex.reshape_and_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping.flatten().to(torch.int32),
+                )
+            else:
+                cache_ops.reshape_and_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    input_metadata.slot_mapping.flatten(),
+                )
 
         if input_metadata.is_prompt:
             # Prompt run.
@@ -147,17 +168,37 @@ class PagedAttention(nn.Module):
                     key = key.unflatten(0, (batch_size, seq_len))
                     value = value.unflatten(0, (batch_size, seq_len))
 
-                out = xops.memory_efficient_attention_forward(
-                    query,
-                    key,
-                    value,
-                    attn_bias=input_metadata.attn_bias,
-                    p=0.0,
-                    scale=self.scale,
-                    op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
-                    (is_hip()) else None,
-                )
-                output = out.view_as(query)
+                if get_accelerator().device_name() == "xpu":
+                    query = query.contiguous().transpose(0, 1)
+                    key = key.contiguous().transpose(0, 1)
+                    value = value.contiguous().transpose(0, 1)
+                    attn_mask = construct_head_map(input_metadata)
+                    num_prompt = query.size(0)
+                    out = torch.xpu.IpexSDP(
+                        query.unsqueeze(0),
+                        key.unsqueeze(0),
+                        value.unsqueeze(0),
+                        None,
+                        attn_mask,
+                        None,
+                        self.scale,
+                        1.0,
+                        0.0,
+                        True
+                    )
+                    output = out.transpose(1, 2).squeeze(0)
+                else:
+                    out = xops.memory_efficient_attention_forward(
+                        query,
+                        key,
+                        value,
+                        attn_bias=input_metadata.attn_bias,
+                        p=0.0,
+                        scale=self.scale,
+                        op=xops.fmha.MemoryEfficientAttentionFlashAttentionOp[0] if
+                        (is_hip()) else None,
+                    )
+                    output = out.view_as(query)
             else:
                 # prefix-enabled attention
                 output = torch.empty_like(query)
@@ -199,7 +240,7 @@ def _make_alibi_bias(
     seq_len: int,
     dtype: torch.dtype,
 ) -> LowerTriangularMaskWithTensorBias:
-    bias = torch.arange(seq_len, dtype=dtype, device="cuda")
+    bias = torch.arange(seq_len, dtype=dtype, device=get_accelerator().device_name())
     # NOTE(zhuohan): HF uses
     #     `bias = bias[None, :].repeat(prompt_len, 1)`
     # here. We find that both biases give the same results, but
@@ -253,19 +294,35 @@ def _paged_attention(
         max_num_partitions == 1 or num_seqs * num_heads > 512)
     if use_v1:
         # Run PagedAttention V1.
-        ops.paged_attention_v1(
-            output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            input_metadata.block_tables,
-            input_metadata.context_lens,
-            block_size,
-            input_metadata.max_context_len,
-            alibi_slopes,
-        )
+        if get_accelerator().device_name() == "xpu":
+            # print(f"vllm+ipex::PagedAttn", flush=True)
+            torch.xpu.IpexPaged_attention(
+                output,
+                query,
+                key_cache,
+                value_cache,
+                torch.arange(num_kv_heads, dtype=torch.int32, device="xpu"),
+                input_metadata.block_tables,
+                input_metadata.context_lens,
+                1.0 / math.sqrt(head_size),
+                block_size,
+                input_metadata.max_context_len,
+                alibi_slopes,
+            )
+        else:
+            ops.paged_attention_v1(
+                output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                input_metadata.block_tables,
+                input_metadata.context_lens,
+                block_size,
+                input_metadata.max_context_len,
+                alibi_slopes,
+            )
     else:
         # Run PagedAttention V2.
         assert _PARTITION_SIZE % block_size == 0

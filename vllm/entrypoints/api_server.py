@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 import uvicorn
 
+from accelerator import get_accelerator
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
@@ -87,7 +88,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine_args.enforce_eager = True
     engine = AsyncLLMEngine.from_engine_args(engine_args)
+    if get_accelerator().device_name == "xpu":
+        import intel_extension_for_pytorch as ipex
+        import torch
+        for idx, worker in enumerate(engine.engine.workers):
+            engine.engine.workers[idx].model = ipex.optimize_transformers(
+                worker.model, dtype=torch.float16, device="xpu", inplace=True)
 
     app.root_path = args.root_path
     uvicorn.run(app,

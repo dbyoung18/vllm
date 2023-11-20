@@ -198,11 +198,11 @@ def main(args: argparse.Namespace):
         latency / (prompt_len + output_len)
         for prompt_len, output_len, latency in REQUEST_LATENCY
     ])
-    print(f"Average latency per token: {avg_per_token_latency:.2f} s")
+    print(f"Average latency per token: {avg_per_token_latency * 1000:.2f} ms")
     avg_per_output_token_latency = np.mean(
         [latency / output_len for _, output_len, latency in REQUEST_LATENCY])
     print("Average latency per output token: "
-          f"{avg_per_output_token_latency:.2f} s")
+          f"{avg_per_output_token_latency * 1000:.2f} ms")
 
 
 if __name__ == "__main__":

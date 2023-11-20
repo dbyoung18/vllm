@@ -3,7 +3,9 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from vllm._C import cache_ops
+from accelerator import get_accelerator
+if get_accelerator().device_name() == "cuda":
+    from vllm._C import cache_ops
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import in_wsl
@@ -45,14 +47,14 @@ class CacheEngine:
         self.cpu_cache = self.allocate_cpu_cache()
 
         # Initialize the stream for caching operations.
-        self.cache_stream = torch.cuda.Stream()
-        assert self.cache_stream != torch.cuda.current_stream()
+        self.cache_stream = get_accelerator().Stream()
+        # assert self.cache_stream != get_accelerator().current_stream()
         # Initialize the events for stream synchronization.
-        self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
+        self.events = [get_accelerator().Event() for _ in range(self.num_layers)]
 
     def get_key_block_shape(self) -> Tuple[int, int, int, int]:
         element_size = torch.tensor([], dtype=self.dtype).element_size()
-        x = 16 // element_size
+        x = 1 if get_accelerator().device_name() == "xpu" else (16 // element_size)
         return (
             self.num_heads,
             self.head_size // x,
@@ -75,12 +77,12 @@ class CacheEngine:
             key_blocks = torch.empty(
                 size=(self.num_gpu_blocks, *key_block_shape),
                 dtype=self.dtype,
-                device="cuda",
+                device=get_accelerator().device_name(),
             )
             value_blocks = torch.empty(
                 size=(self.num_gpu_blocks, *value_block_shape),
                 dtype=self.dtype,
-                device="cuda",
+                device=get_accelerator().device_name(),
             )
             gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
@@ -89,7 +91,7 @@ class CacheEngine:
         cpu_cache: List[KVCache] = []
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
-        pin_memory = not in_wsl()
+        pin_memory = not in_wsl() and get_accelerator().device_name() == "cuda"
         if not pin_memory:
             # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
@@ -115,15 +117,24 @@ class CacheEngine:
         dst: List[KVCache],
         src_to_dst: Dict[int, int],
     ) -> None:
-        with torch.cuda.stream(self.cache_stream):
+        with get_accelerator().stream(self.cache_stream):
+            # W/A: src_to_dst: Dict[int, int] -> tensor([num_pair, 2])
+            if get_accelerator().device_name() == "xpu":
+                src_to_dst = torch.tensor(
+                    [[src, dst] for src, dst in src_to_dst.items()], device="xpu")
             for i in range(self.num_layers):
                 src_key_cache, src_value_cache = src[i]
                 dst_key_cache, dst_value_cache = dst[i]
-                # Copy the key blocks.
-                cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
-                # Copy the value blocks.
-                cache_ops.swap_blocks(src_value_cache, dst_value_cache,
-                                      src_to_dst)
+                if get_accelerator().device_name() == "xpu":
+                    # Copy the key blocks.
+                    torch.ops.torch_ipex.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+                    # Copy the value blocks.
+                    torch.ops.torch_ipex.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
+                else:
+                    # Copy the key blocks.
+                    cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+                    # Copy the value blocks.
+                    cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
                 event = self.events[i]
                 event.record(stream=self.cache_stream)
 
@@ -137,7 +148,17 @@ class CacheEngine:
         key_caches = [key_cache for key_cache, _ in self.gpu_cache]
         value_caches = [value_cache for _, value_cache in self.gpu_cache]
         # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
-        cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
+        if get_accelerator().device_name() == "xpu":
+            # W/A: src_to_dsts: Dict[int, List[int]] -> tensor([num_pair, 2])
+            src_to_dsts_list = []
+            for src, dsts in src_to_dsts.items():
+                for dst in dsts:
+                    src_to_dsts_list.append([src, dst])
+            src_to_dsts = torch.tensor(src_to_dsts_list, device="xpu")
+
+            torch.ops.torch_ipex.copy_blocks(key_caches, value_caches, src_to_dsts)
+        else:
+            cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(

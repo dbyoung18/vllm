@@ -5,7 +5,9 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm._C import ops
+from accelerator import get_accelerator
+if get_accelerator().device_name() == "cuda":
+    from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -127,7 +129,7 @@ class GPTQLinearMethod(LinearMethodBase):
             torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
                 output_size_per_partition,
-                device="cuda",
+                device=get_accelerator().device_name(),
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -145,7 +147,7 @@ class GPTQLinearMethod(LinearMethodBase):
                     i // self.quant_config.group_size
                     for i in range(input_size_per_partition)
                 ],
-                device="cuda",
+                device=get_accelerator().device_name(),
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -156,7 +158,7 @@ class GPTQLinearMethod(LinearMethodBase):
             torch.empty(
                 scale_and_zero_size,
                 output_size_per_partition // self.quant_config.pack_factor,
-                device="cuda",
+                device=get_accelerator().device_name(),
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -172,7 +174,7 @@ class GPTQLinearMethod(LinearMethodBase):
             torch.empty(
                 scale_and_zero_size,
                 output_size_per_partition,
-                device="cuda",
+                device=get_accelerator().device_name(),
                 dtype=params_dtype,
             ),
             requires_grad=False,
