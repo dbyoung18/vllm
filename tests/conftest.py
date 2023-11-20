@@ -5,6 +5,7 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM
 
+from accelerator import get_accelerator
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -57,7 +58,7 @@ class HfRunner:
             model_name,
             torch_dtype=torch_dtype,
             trust_remote_code=True,
-        ).cuda()
+        ).to(get_acclerator().current_device())
         if tokenizer_name is None:
             tokenizer_name = model_name
         self.tokenizer = get_tokenizer(tokenizer_name, trust_remote_code=True)
@@ -71,7 +72,7 @@ class HfRunner:
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
             output_ids = self.model.generate(
-                input_ids.cuda(),
+                input_ids.to(get_acclerator().current_device()),
                 use_cache=True,
                 **kwargs,
             )
@@ -127,7 +128,7 @@ class HfRunner:
         for prompt in prompts:
             input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
             output = self.model.generate(
-                input_ids.cuda(),
+                input_ids.to(get_acclerator().current_device()),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,

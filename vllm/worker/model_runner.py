@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from accelerator import get_accelerator
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
@@ -124,14 +125,17 @@ class ModelRunner:
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_prompt_len,
                                              pad=0,
+                                             device=get_accelerator().device_name(),
                                              dtype=torch.long)
         input_positions = _make_tensor_with_pad(input_positions,
                                                 max_prompt_len,
                                                 pad=0,
+                                                device=get_accelerator().device_name(),
                                                 dtype=torch.long)
         slot_mapping = _make_tensor_with_pad(slot_mapping,
                                              max_prompt_len,
                                              pad=_PAD_SLOT_ID,
+                                             device=get_accelerator().device_name(),
                                              dtype=torch.long)
 
         input_metadata = InputMetadata(
@@ -205,7 +209,7 @@ class ModelRunner:
 
         # When using CUDA graph, we don't need to make the tensors on the GPU
         # because they will be eventually copied to the designated GPU buffer.
-        device = "cpu" if use_captured_graph else "cuda"
+        device = "cpu" if use_captured_graph else get_accelerator().device_name()
         pin_memory = use_captured_graph and not self.in_wsl
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_len=1,
@@ -244,6 +248,7 @@ class ModelRunner:
                 max_len=max_context_len,
                 pad=0,
                 dtype=torch.int,
+                device=device,
             )
 
         input_metadata = InputMetadata(
@@ -394,7 +399,7 @@ class ModelRunner:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [(None, None)] * num_layers
         self.execute_model(seqs, kv_caches)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         return
 
     @torch.inference_mode()
@@ -411,13 +416,13 @@ class ModelRunner:
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long).cuda()
+        input_tokens = torch.zeros(max_batch_size, 1, dtype=torch.long).to(get_accelerator().current_device_name())
         input_positions = torch.zeros(max_batch_size, 1,
-                                      dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).cuda()
+                                      dtype=torch.long).to(get_accelerator().current_device_name())
+        slot_mapping = torch.empty(max_batch_size, 1, dtype=torch.long).to(get_accelerator().current_device_name())
         slot_mapping.fill_(_PAD_SLOT_ID)
-        context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
-        block_tables = torch.from_numpy(self.graph_block_tables).cuda()
+        context_lens = torch.ones(max_batch_size, dtype=torch.int32).to(get_accelerator().current_device_name())
+        block_tables = torch.from_numpy(self.graph_block_tables).to(get_accelerator().current_device_name())
 
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
@@ -560,5 +565,5 @@ def _get_graph_batch_size(batch_size: int) -> int:
 
 
 def _async_h2d(data: list, dtype, pin_memory):
-    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory)
-    return t.to(device="cuda", non_blocking=True)
+    t = torch.tensor(data, dtype=dtype, pin_memory=(get_accelerator().device_name() == "cuda"))
+    return t.to(device=get_accelerator().device_name(), non_blocking=True)

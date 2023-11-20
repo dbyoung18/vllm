@@ -13,6 +13,7 @@ import torch
 from transformers import PretrainedConfig
 from tqdm.auto import tqdm
 
+from accelerator import get_accelerator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (get_quantization_config,
                                                      QuantizationConfig)
@@ -246,7 +247,7 @@ def hf_model_weights_iterator(
             for name, param in state.items():
                 yield name, param
             del state
-            torch.cuda.empty_cache()
+            get_accelerator().empty_cache()
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:

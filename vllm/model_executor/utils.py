@@ -5,13 +5,14 @@ from typing import Any, Dict, Optional
 import numpy as np
 import torch
 
+from accelerator import get_accelerator
+
 
 def set_random_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    get_accelerator().manual_seed_all(seed)
 
 
 def set_weight_attrs(

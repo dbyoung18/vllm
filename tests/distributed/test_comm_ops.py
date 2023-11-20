@@ -7,6 +7,7 @@ from multiprocessing import Process, set_start_method
 import pytest
 import torch
 
+from accelerator import get_accelerator
 from vllm.config import ParallelConfig
 from vllm.engine.ray_utils import get_open_port
 from vllm.model_executor.parallel_utils.communication_op import (
@@ -23,7 +24,7 @@ def init_test_distributed_environment(pipeline_parallel_size: int,
                                      tensor_parallel_size,
                                      worker_use_ray=True)
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
-    torch.cuda.set_device(rank)
+    get_accelerator().set_device(rank)
     _init_distributed_environment(parallel_config, rank,
                                   distributed_init_method)
 
@@ -34,7 +35,7 @@ def all_reduce_test_worker(tensor_parallel_size: int, rank: int,
                                       distributed_init_port)
     num_elements = 8
     all_tensors = [
-        torch.arange(num_elements, dtype=torch.float32, device="cuda") *
+        torch.arange(num_elements, dtype=torch.float32, device=get_accelerator().device_name()) *
         (r + 1) for r in range(tensor_parallel_size)
     ]
     expected = torch.sum(torch.stack(all_tensors, dim=0), dim=0)
@@ -55,7 +56,7 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
     for all_gather_dimension in range(num_dimensions):
         all_tensors = [
             torch.arange(total_size, dtype=torch.float32,
-                         device="cuda").reshape(tensor_size) * (r + 1)
+                         device=get_accelerator().current_name()).reshape(tensor_size) * (r + 1)
             for r in range(tensor_parallel_size)
         ]
         expected = torch.cat(all_tensors, dim=all_gather_dimension)
@@ -64,7 +65,7 @@ def all_gather_test_worker(tensor_parallel_size: int, rank: int,
         assert torch.allclose(t, expected)
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
+@pytest.mark.skipif(get_accelerator().device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("tensor_parallel_size", [2])
 @pytest.mark.parametrize("test_target",

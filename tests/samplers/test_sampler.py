@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from accelerator import get_accelerator
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
@@ -30,7 +31,7 @@ def _prepare_test(
 ) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler, ModelRunner]:
     vocab_size = 32000
     input_tensor = torch.rand((batch_size, 1024),
-                              device="cuda",
+                              device=get_accelerator().device_name(),
                               dtype=torch.float16)
     fake_logits = torch.full((batch_size, vocab_size),
                              1e-2,

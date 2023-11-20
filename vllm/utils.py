@@ -6,7 +6,9 @@ from platform import uname
 import psutil
 import torch
 
-from vllm._C import cuda_utils
+from accelerator import get_accelerator
+if get_accelerator().device_name() == "cuda":
+    from vllm._C import cuda_utils
 
 
 class Device(enum.Enum):
@@ -33,12 +35,21 @@ def is_hip() -> bool:
 
 
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
-    """Returns the maximum shared memory per thread block in bytes."""
-    # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
-    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97 if not is_hip() else 74
-    max_shared_mem = cuda_utils.get_device_attribute(
-        cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
-    return int(max_shared_mem)
+    # TODO: fix hardcode for xpu
+    if get_accelerator().device_name == "xpu":
+        return 65536 * 10
+    else:
+        """Returns the maximum shared memory per thread block in bytes."""
+        # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html
+        cudaDevAttrMaxSharedMemoryPerBlockOptin = 97 if not is_hip() else 74
+        max_shared_mem = cuda_utils.get_device_attribute(
+            cudaDevAttrMaxSharedMemoryPerBlockOptin, gpu)
+        return int(max_shared_mem)
+
+
+def get_gpu_memory(gpu: int = 0) -> int:
+    """Returns the total memory of the GPU in bytes."""
+    return get_accelerator().total_memory(gpu)
 
 
 def get_cpu_memory() -> int:

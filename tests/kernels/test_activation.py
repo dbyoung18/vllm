@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from accelerator import get_accelerator
 from vllm.model_executor.layers.activation import FastGELU, NewGELU, SiluAndMul
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -21,8 +22,8 @@ def test_silu_and_mul(
     seed: int,
 ) -> None:
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    x = torch.randn(num_tokens, 2 * d, dtype=dtype, device="cuda")
+    get_accelerator().manual_seed(seed)
+    x = torch.randn(num_tokens, 2 * d, dtype=dtype, device=get_accelerator().device_name())
     layer = SiluAndMul()
     out = layer(x)
     ref_out = layer._forward(x)
@@ -41,8 +42,8 @@ def test_gelu_new(
     seed: int,
 ) -> None:
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    x = torch.randn(num_tokens, d, dtype=dtype, device="cuda")
+    get_accelerator().manual_seed(seed)
+    x = torch.randn(num_tokens, d, dtype=dtype, device=get_accelerator().device_name())
     layer = NewGELU()
     out = layer(x)
     ref_out = layer._forward(x)
@@ -60,8 +61,8 @@ def test_gelu_fast(
     seed: int,
 ) -> None:
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    x = torch.randn(num_tokens, d, dtype=dtype, device="cuda")
+    get_accelerator().manual_seed(seed)
+    x = torch.randn(num_tokens, d, dtype=dtype, device=get_accelerator().device_name())
     layer = FastGELU()
     out = layer(x)
     ref_out = layer._forward(x)

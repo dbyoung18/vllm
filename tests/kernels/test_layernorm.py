@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from accelerator import get_accelerator
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -24,12 +25,12 @@ def test_rms_norm(
     seed: int,
 ) -> None:
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    get_accelerator().manual_seed(seed)
 
-    layer = RMSNorm(hidden_size).to(dtype).cuda()
+    layer = RMSNorm(hidden_size).to(dtype).to(get_accelerator.current_device())
     layer.weight.data.normal_(mean=1.0, std=0.1)
     scale = 1 / (2 * hidden_size)
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=get_accelerator().device_name())
     x *= scale
     residual = torch.randn_like(x) * scale if add_residual else None
 

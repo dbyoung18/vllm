@@ -3,6 +3,7 @@ import random
 import pytest
 import torch
 
+from accelerator import get_accelerator
 from vllm._C import cache_ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -38,7 +39,7 @@ def test_copy_blocks(
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    get_accelerator().manual_seed(seed)
 
     # Generate random block mappings where each source block is mapped to two
     # destination blocks.
@@ -101,19 +102,19 @@ def test_reshape_and_cache(
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    get_accelerator().manual_seed(seed)
 
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device="cuda")
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=get_accelerator().device_name())
 
     qkv = torch.randn(num_tokens,
                       3,
                       num_heads,
                       head_size,
                       dtype=dtype,
-                      device="cuda")
+                      device=get_accelerator().device_name())
     _, key, value = qkv.unbind(dim=1)
 
     # Create the KV caches.

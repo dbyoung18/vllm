@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from accelerator import get_accelerator
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.weight_utils import (get_quant_config,
@@ -42,7 +43,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
                                         model_config.model,
                                         model_config.hf_config,
                                         model_config.download_dir)
-        capability = torch.cuda.get_device_capability()
+        capability = get_accelerator().get_device_capability()
         capability = capability[0] * 10 + capability[1]
         if capability < quant_config.get_min_capability():
             raise ValueError(
@@ -61,8 +62,7 @@ def get_model(model_config: ModelConfig) -> nn.Module:
     with _set_default_torch_dtype(model_config.dtype):
         # Create a model instance.
         # The weights will be initialized as empty tensors.
-        with torch.device("cuda"):
-            model = model_class(model_config.hf_config, linear_method)
+        model = model_class(model_config.hf_config, linear_method).to(get_accelerator().current_device_name())
         if model_config.load_format == "dummy":
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.

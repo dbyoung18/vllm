@@ -3,6 +3,7 @@ from typing import Optional
 import pytest
 import torch
 
+from accelerator import get_accelerator
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
 IS_NEOX_STYLE = [True, False]
@@ -39,21 +40,21 @@ def test_rotary_embedding(
     if rotary_dim is None:
         rotary_dim = head_size
     torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    get_accelerator().manual_seed(seed)
 
     if rotary_dim is None:
         rotary_dim = head_size
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style)
-    rope = rope.to(dtype).cuda()
+    rope = rope.to(dtype).to(get_acclerator().current_device())
 
     positions = torch.randint(0,
                               max_position, (batch_size, seq_len),
-                              device="cuda")
+                              device=get_accelerator().device_name())
     query = torch.randn(batch_size,
                         seq_len,
                         num_heads * head_size,
                         dtype=dtype,
-                        device="cuda")
+                        device=get_accelerator().device_name())
     key = torch.randn_like(query)
 
     # NOTE(woosuk): The reference implementation should be executed first

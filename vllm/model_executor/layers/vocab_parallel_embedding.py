@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from accelerator import get_accelerator
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -68,7 +69,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.weight = Parameter(
             torch.empty(self.num_embeddings_per_partition,
                         self.embedding_dim,
-                        device=torch.cuda.current_device(),
+                        device=get_accelerator().device_name(),
                         dtype=params_dtype))
         set_weight_attrs(self.weight, {
             "parallel_dim": 0,
@@ -125,7 +126,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,
-                            device=torch.cuda.current_device(),
+                            device=get_accelerator().device_name(),
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "parallel_dim": 0,
