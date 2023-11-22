@@ -145,7 +145,7 @@ class CacheEngine:
         key_caches = [key_cache for key_cache, _ in self.gpu_cache]
         value_caches = [value_cache for _, value_cache in self.gpu_cache]
         copy_block_op = None
-        if key_caches[0].device == "xpu":
+        if key_caches[0].device.type == "xpu":
             copy_block_op = torch.ops.torch_ipex.copy_blocks
         else:
             copy_block_op = cache_ops.copy_blocks
