@@ -147,6 +147,12 @@ class CacheEngine:
         copy_block_op = None
         if key_caches[0].device.type == "xpu":
             copy_block_op = torch.ops.torch_ipex.copy_blocks
+            # W/A: src_to_dsts: Dict[int, List[int]] -> tensor([num_pair, 2])
+            src_to_dsts_list = []
+            for src, dsts in src_to_dsts.items():
+                for dst in dsts:
+                    src_to_dsts_list.append([src, dst])
+            src_to_dsts = torch.tensor(src_to_dsts_list, device="xpu")
         else:
             copy_block_op = cache_ops.copy_blocks
         # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
