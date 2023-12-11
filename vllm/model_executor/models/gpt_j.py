@@ -255,6 +255,9 @@ class GPTJForCausalLM(nn.Module):
                 continue
 
             is_attention_weight = False
+            # W/A for self.state_dict mismatch w/ hf_model.state_dict
+            if name not in state_dict.keys():
+                continue
             for stride_id, att_weight_name in enumerate(
                 ["q_proj", "k_proj", "v_proj"]):
                 if att_weight_name not in name:
