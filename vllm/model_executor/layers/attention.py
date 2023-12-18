@@ -291,25 +291,57 @@ class PagedAttention(nn.Module):
         # sequences or heads is large, we use V1 since there is enough work
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
-        use_v1 = max_num_partitions == 1 or num_seqs * num_heads > 512
+        # For context len > 8192, use V2 kernel to avoid shared memory shortage.
+        # use_v1 = input_metadata.max_context_len <= 8192 and (
+        #     max_num_partitions == 1 or num_seqs * num_heads > 512)
+        use_v1 = input_metadata.max_context_len <= 8192
         if use_v1:
             # Run PagedAttention V1.
-            # attention_ops.paged_attention_v1(
-            #     output,
-            #     query,
-            #     key_cache,
-            #     value_cache,
-            #     self.head_mapping,
-            #     self.scale,
-            #     input_metadata.block_tables,
-            #     input_metadata.context_lens,
-            #     block_size,
-            #     input_metadata.max_context_len,
-            #     alibi_slopes,
-            # )
-            # ref_single_query_cached_kv_attention(output, query, 1, key_cache, value_cache, )
-            page_attention_python(output, query, key_cache, value_cache, self.head_mapping,
-                                  self.scale, input_metadata.block_tables, input_metadata.context_lens, block_size, input_metadata.max_context_len, alibi_slopes)
+            if output.device.type == "xpu":
+                print("xpu Paged Attention V1")
+                torch.xpu.IpexPaged_attention(
+                    output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    self.head_mapping,
+                    input_metadata.block_tables,
+                    input_metadata.context_lens,
+                    self.scale,
+                    block_size,
+                    input_metadata.max_context_len,
+                    alibi_slopes
+                )
+            elif output.devive.type == "cuda":
+                print("cuda Paged Attention V1")
+                attention_ops.paged_attention_v1(
+                    output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    self.head_mapping,
+                    self.scale,
+                    input_metadata.block_tables,
+                    input_metadata.context_lens,
+                    block_size,
+                    input_metadata.max_context_len,
+                    alibi_slopes,
+                )
+            else:
+                print("ref Paged Attention V1")
+                page_attention_python(
+                    output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    self.head_mapping,
+                    self.scale,
+                    input_metadata.block_tables,
+                    input_metadata.context_lens,
+                    block_size,
+                    input_metadata.max_context_len,
+                    alibi_slopes
+                )
         else:
             # Run PagedAttention V2.
             assert _PARTITION_SIZE % block_size == 0
@@ -324,22 +356,41 @@ class PagedAttention(nn.Module):
                 device=output.device,
             )
             max_logits = torch.empty_like(exp_sums)
-            attention_ops.paged_attention_v2(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                self.head_mapping,
-                self.scale,
-                input_metadata.block_tables,
-                input_metadata.context_lens,
-                block_size,
-                input_metadata.max_context_len,
-                alibi_slopes,
-            )
+            if output.device.type == "xpu":
+                # TODO: implement IPEX PagedAttn V2 Interface
+                # torch.xpu.IpexPaged_attention(
+                #     output,
+                #     max_logits,
+                #     exp_sums,
+                #     tmp_output,
+                #     query,
+                #     key_cache,
+                #     value_cache,
+                #     self.head_mapping,
+                #     input_metadata.block_tables,
+                #     input_metadata.context_lens,
+                #     self.scale,
+                #     block_size,
+                #     input_metadata.max_context_len,
+                #     alibi_slopes,
+                # )
+            else:  # cuda
+                attention_ops.paged_attention_v2(
+                    output,
+                    exp_sums,
+                    max_logits,
+                    tmp_output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    self.head_mapping,
+                    self.scale,
+                    input_metadata.block_tables,
+                    input_metadata.context_lens,
+                    block_size,
+                    input_metadata.max_context_len,
+                    alibi_slopes,
+                )
 
     def forward(
         self,
