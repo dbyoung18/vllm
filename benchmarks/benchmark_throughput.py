@@ -1,6 +1,7 @@
 """Benchmark offline inference throughput."""
 import argparse
 import json
+import os
 import random
 import time
 from typing import List, Optional, Tuple
@@ -11,6 +12,34 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from tqdm import tqdm
 
 from accelerator import get_accelerator
+
+
+def profile_handler(
+    profile_ctx, device_type="cpu", profile_prefix="gptj", profile_dir=f"./profile"
+):
+    def save_profile(profile_table, profile_path):
+        print(profile_table)
+        with open(profile_path, "w") as profile_file:
+            profile_file.write(profile_table)
+
+    os.makedirs(profile_dir, exist_ok=True)
+    print(f"Exporting {profile_prefix} to {profile_dir}")
+    save_profile(
+        profile_ctx.key_averages().table(sort_by=f"self_{device_type}_time_total"),
+        os.path.join(profile_dir, f"{profile_prefix}_profile.prof"),
+    )
+    # save_profile(
+    #     profile_ctx.table(sort_by="id", row_limit=-1),
+    #     os.path.join(profile_dir, f"{profile_prefix}_profile_id.prof"),
+    # )
+
+    # save_profile(
+    #     profile_ctx.key_averages(group_by_input_shape=True).table(),
+    #     os.path.join(profile_dir, f"{profile_prefix}_profile_group.prof"),
+    # )
+    profile_ctx.export_chrome_trace(
+        os.path.join(profile_dir, f"{profile_prefix}_trace.json")
+    )
 
 
 def sample_requests(
@@ -73,6 +102,7 @@ def run_vllm(
     dtype: str,
     max_model_len: Optional[int],
     enforce_eager: bool,
+    args
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -85,28 +115,66 @@ def run_vllm(
         dtype=dtype,
         max_model_len=max_model_len,
         enforce_eager=enforce_eager,
+        block_size=32
     )
+
+    if args.device_type == "xpu" and args.optimize_transformers:
+        import intel_extension_for_pytorch as ipex
+        llm.llm_engine.driver_worker.model_runner.model = ipex.optimize_transformers(
+            llm.llm_engine.driver_worker.model_runner.model, dtype=args.dtype, inplace=True, device=args.device_type
+        )
+
+    # init Sampler
+    if n == 1:
+        print("==> use GreedySearch")
+        sampling_params = SamplingParams(
+            best_of=1,
+            top_p=1,
+            top_k=-1,
+            temperature=0
+        )  # GreedySearch
+    else:
+        print("==> use BeamSearch")
+        sampling_params = SamplingParams(
+            use_beam_search=use_beam_search,
+            best_of=n,
+            top_k=-1,
+            temperature=0,
+            max_tokens=128,
+            early_stopping=True
+        )  # BeamSearch
+    print(f"sampling_params:{sampling_params}", flush=True)
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
-        sampling_params = SamplingParams(
-            n=n,
-            temperature=0.0 if use_beam_search else 1.0,
-            top_p=1.0,
-            use_beam_search=use_beam_search,
-            ignore_eos=True,
-            max_tokens=output_len,
-        )
         # FIXME(woosuk): Do not use internal method.
         llm._add_request(
             prompt=prompt,
             prompt_token_ids=None,
             sampling_params=sampling_params,
         )
+    print(f"num_requests:{len(requests)}", flush=True)
 
     start = time.perf_counter()
-    # FIXME(woosuk): Do not use internal method.
-    llm._run_engine(use_tqdm=True)
+    if args.profile:
+        if args.device_type == "xpu":
+            with torch.autograd.profiler_legacy.profile(
+                enabled=args.profile, use_xpu=(args.device_type == "xpu"), record_shapes=True
+            ) as prof:
+                llm._run_engine(use_tqdm=True)
+                torch.xpu.synchronize()
+            profile_handler(prof, args.device_type, f"gptj_throughput")
+        else:
+            from torch.profiler import profile, ProfilerActivity
+            with profile(activities=[
+                ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True
+            ) as prof:
+                llm._run_engine(use_tqdm=True)
+                torch.cuda.synchronize()
+            profile_handler(prof, args.device_type, f"gptj_throughput")
+    else:
+        # FIXME(woosuk): Do not use internal method.
+        llm._run_engine(use_tqdm=True)
     end = time.perf_counter()
     return end - start
 
@@ -208,7 +276,8 @@ def main(args: argparse.Namespace):
                                 args.quantization, args.tensor_parallel_size,
                                 args.seed, args.n, args.use_beam_search,
                                 args.trust_remote_code, args.dtype,
-                                args.max_model_len, args.enforce_eager)
+                                args.max_model_len, args.enforce_eager,
+                                args)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -286,6 +355,19 @@ if __name__ == "__main__":
     parser.add_argument("--enforce-eager",
                         action="store_true",
                         help="enforce eager execution")
+    parser.add_argument("--profile", action="store_true", help="Enable profiler.")
+    parser.add_argument(
+        "--optimize_transformers",
+        action="store_true",
+        help="Enable IPEX optimize_transformers for xpu.",
+    )
+    parser.add_argument(
+        "--device_type",
+        type=str,
+        choices=["cpu", "xpu", "cuda"],
+        default="xpu",
+        help="Device type for inference, choose from cpu, xpu or cuda",
+    )
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
