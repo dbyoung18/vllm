@@ -12,9 +12,10 @@ import torch
 
 import vllm.envs as env
 from vllm.lora.layers import LoRAMapping
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
-if HAS_TRITON:
+if HAS_TRITON and not current_platform.is_xpu():
     if env.VLLM_USE_V1:
         from vllm.lora.ops.triton_ops.v1 import (V1KernelMeta, v1_expand,
                                                  v1_shrink)
@@ -24,6 +25,14 @@ if HAS_TRITON:
         from vllm.lora.ops.triton_ops import bgmv_shrink
         from vllm.lora.ops.triton_ops import sgmv_expand
         from vllm.lora.ops.triton_ops import sgmv_shrink
+elif current_platform.is_xpu():
+    from vllm._ipex_ops import ipex_ops
+    bgmv_expand = ipex_ops.bgmv_expand
+    bgmv_expand_slice = ipex_ops.bgmv_expand_slice
+    bgmv_shrink = ipex_ops.bgmv_shrink
+    sgmv_expand = ipex_ops.sgmv_expand
+    sgmv_expand_slice = ipex_ops.sgmv_expand_slice
+    sgmv_shrink = ipex_ops.sgmv_shrink
 
 from .punica_base import PunicaWrapperBase
 
@@ -210,7 +219,7 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
         if env.VLLM_USE_V1:
             self._v1_apply_shrink(y, x, lora_a_stacked, scale)  # type: ignore
         else:
-            if self.is_prefill:
+            if self.is_prefill and not current_platform.is_xpu():
                 # NOTE fused kernel
                 self._apply_shrink_prefill(
                     y,  # type: ignore
@@ -270,7 +279,7 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
                 add_inputs=True)
         else:
 
-            if self.is_prefill:
+            if self.is_prefill and not current_platform.is_xpu():
                 # NOTE fused kernel
                 self._apply_expand_prefill(
                     y,
@@ -317,7 +326,7 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
                                   offset_start=0,
                                   add_inputs=add_inputs)
         else:
-            if self.is_prefill:
+            if self.is_prefill and not current_platform.is_xpu():
                 sgmv_expand(
                     x.unsqueeze(dim=0),
                     (lora_b_stacked, ),
