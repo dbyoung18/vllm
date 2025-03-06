@@ -220,6 +220,200 @@ def fused_moe_kernel_gptq_awq(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
+def ceil_div(a, b):
+    return (a + b - 1) // b
+
+
+@triton.jit
+def moe_align_block_size_stage1(
+    topk_ids_ptr,
+    tokens_cnts_ptr,
+    num_experts: tl.constexpr,
+    numel: tl.constexpr,
+    tokens_per_thread: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    start_idx = pid * tokens_per_thread
+
+    off_c = (pid + 1) * num_experts
+
+    for i in range(tokens_per_thread):
+        if start_idx + i < numel:
+            idx = tl.load(topk_ids_ptr + start_idx + i)
+            token_cnt = tl.load(tokens_cnts_ptr + off_c + idx)
+            tl.store(tokens_cnts_ptr + off_c + idx, token_cnt + 1)
+
+
+@triton.jit
+def moe_align_block_size_stage2(
+    tokens_cnts_ptr,
+    num_experts: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    last_cnt = 0
+    for i in range(1, num_experts + 1):
+        token_cnt = tl.load(tokens_cnts_ptr + i * num_experts + pid)
+        last_cnt = last_cnt + token_cnt
+        tl.store(tokens_cnts_ptr + i * num_experts + pid, last_cnt)
+
+
+@triton.jit
+def moe_align_block_size_stage3(
+    total_tokens_post_pad_ptr,
+    tokens_cnts_ptr,
+    cumsum_ptr,
+    num_experts: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    last_cumsum = 0
+    off_cnt = num_experts * num_experts
+    for i in range(1, num_experts + 1):
+        token_cnt = tl.load(tokens_cnts_ptr + off_cnt + i - 1)
+        last_cumsum = last_cumsum + tl.cdiv(token_cnt, block_size) * block_size
+        tl.store(cumsum_ptr + i, last_cumsum)
+    tl.store(total_tokens_post_pad_ptr, last_cumsum)
+
+
+@triton.jit
+def moe_align_block_size_stage4(
+    topk_ids_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    tokens_cnts_ptr,
+    cumsum_ptr,
+    num_experts: tl.constexpr,
+    block_size: tl.constexpr,
+    numel: tl.constexpr,
+    tokens_per_thread: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    start_idx = tl.load(cumsum_ptr + pid)
+    end_idx = tl.load(cumsum_ptr + pid + 1)
+
+    for i in range(start_idx, end_idx, block_size):
+        tl.store(expert_ids_ptr + i // block_size, pid)
+
+    start_idx = pid * tokens_per_thread
+    off_t = pid * num_experts
+
+    for i in range(start_idx, tl.minimum(start_idx + tokens_per_thread, numel)):
+        expert_id = tl.load(topk_ids_ptr + i)
+        token_cnt = tl.load(tokens_cnts_ptr + off_t + expert_id)
+        rank_post_pad = token_cnt + tl.load(cumsum_ptr + expert_id)
+        tl.store(sorted_token_ids_ptr + rank_post_pad, i)
+        tl.store(tokens_cnts_ptr + off_t + expert_id, token_cnt + 1)
+
+
+def moe_align_block_size_triton(
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+) -> None:
+    numel = topk_ids.numel()
+    grid = (num_experts,)
+    tokens_cnts = torch.zeros(
+        (num_experts + 1, num_experts), dtype=torch.int32, device=topk_ids.device
+    )
+    cumsum = torch.zeros((num_experts + 1,), dtype=torch.int32, device=topk_ids.device)
+    tokens_per_thread = ceil_div(numel, num_experts)
+
+    moe_align_block_size_stage1[grid](
+        topk_ids,
+        tokens_cnts,
+        num_experts,
+        numel,
+        tokens_per_thread,
+    )
+    moe_align_block_size_stage2[grid](
+        tokens_cnts,
+        num_experts,
+    )
+    moe_align_block_size_stage3[(1,)](
+        num_tokens_post_pad,
+        tokens_cnts,
+        cumsum,
+        num_experts,
+        block_size,
+    )
+    moe_align_block_size_stage4[grid](
+        topk_ids,
+        sorted_token_ids,
+        expert_ids,
+        tokens_cnts,
+        cumsum,
+        num_experts,
+        block_size,
+        numel,
+        tokens_per_thread,
+    )
+
+
+def ref_moe_align_block_size(
+    topk_ids: torch.Tensor, block_size: int, num_experts: int
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Aligns the token distribution across experts to be compatible with block
+    size for matrix multiplication.
+
+    Parameters:
+    - topk_ids: A tensor of shape [total_tokens, top_k] representing the
+        top-k expert indices for each token.
+    - block_size: The block size used in block matrix multiplication.
+    - num_experts: The total number of experts.
+
+    Returns:
+    - sorted_token_ids: A tensor containing the sorted token indices according
+        to their allocated expert.
+    - expert_ids: A tensor indicating the assigned expert index for each block.
+    - num_tokens_post_padded: The total number of tokens after padding,
+        ensuring divisibility by block_size.
+
+    This function pads the number of tokens that each expert needs to process
+    so that it is divisible by block_size.
+    Padding ensures that during block matrix multiplication, the dimensions
+    align correctly.
+
+    Example:
+    Given topk_ids = [[2, 3, 4], [1, 2, 4], [1, 3, 4], [1, 2, 3]],
+    block_size = 4, and num_experts = 4:
+    - We initially have 12 tokens (after repeating 'top_k' times) and 4 experts,
+        with each expert needing to process 3 tokens.
+    - As block_size is 4, we pad 1 token for each expert.
+    - First, flatten topk_ids to [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3].
+    - Then append padding tokens [12, 12, 12, 12] for each block.
+    - After sorting by expert index, we obtain token_ids
+        [3, 6, 9, 12, 0, 4, 10, 12, 1, 7, 11, 12, 2, 5, 8, 12].
+        Tokens 12 are non-existent (padding) and are ignored in
+        the subsequent matrix multiplication.
+    - The padding ensures that the total number of tokens is now divisible
+        by block_size for proper block matrix operations.
+    """
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    sorted_ids = torch.empty(
+        (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
+    )
+    sorted_ids.fill_(topk_ids.numel())
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    expert_ids = torch.empty(
+        (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
+    )
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
+    moe_align_block_size_triton(
+        topk_ids,
+        num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+    )
+    return sorted_ids, expert_ids, num_tokens_post_pad
+
+
 @triton.jit
 def fused_moe_kernel(
         # Pointers to matrices
@@ -716,46 +910,48 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         )
 
     else:
-        fused_moe_kernel[grid](
-            A,
-            B,
-            C,
-            A_scale,
-            B_scale,
-            topk_weights,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            B.shape[1],
-            A.shape[1],
-            EM,
-            topk_ids.numel(),
-            A.stride(0),
-            A.stride(1),
-            B.stride(0),
-            B.stride(2),
-            B.stride(1),
-            C.stride(1),
-            C.stride(2),
-            A_scale.stride(0)
-            if A_scale is not None and A_scale.ndim == 2 else 0,
-            A_scale.stride(1)
-            if A_scale is not None and A_scale.ndim == 2 else 0,
-            B_scale.stride(0)
-            if B_scale is not None and B_scale.ndim >= 2 else 0,
-            B_scale.stride(2)
-            if B_scale is not None and B_scale.ndim == 3 else 0,
-            B_scale.stride(1)
-            if B_scale is not None and B_scale.ndim >= 2 else 0,
-            0 if block_shape is None else block_shape[0],
-            0 if block_shape is None else block_shape[1],
-            MUL_ROUTED_WEIGHT=mul_routed_weight,
-            top_k=top_k,
-            compute_type=compute_type,
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            **config,
-        )
+        # TODO: fix fused_moe_kernel
+        return
+        # fused_moe_kernel[grid](
+        #     A,
+        #     B,
+        #     C,
+        #     A_scale,
+        #     B_scale,
+        #     topk_weights,
+        #     sorted_token_ids,
+        #     expert_ids,
+        #     num_tokens_post_padded,
+        #     B.shape[1],
+        #     A.shape[1],
+        #     EM,
+        #     topk_ids.numel(),
+        #     A.stride(0),
+        #     A.stride(1),
+        #     B.stride(0),
+        #     B.stride(2),
+        #     B.stride(1),
+        #     C.stride(1),
+        #     C.stride(2),
+        #     A_scale.stride(0)
+        #     if A_scale is not None and A_scale.ndim == 2 else 0,
+        #     A_scale.stride(1)
+        #     if A_scale is not None and A_scale.ndim == 2 else 0,
+        #     B_scale.stride(0)
+        #     if B_scale is not None and B_scale.ndim >= 2 else 0,
+        #     B_scale.stride(2)
+        #     if B_scale is not None and B_scale.ndim == 3 else 0,
+        #     B_scale.stride(1)
+        #     if B_scale is not None and B_scale.ndim >= 2 else 0,
+        #     0 if block_shape is None else block_shape[0],
+        #     0 if block_shape is None else block_shape[1],
+        #     MUL_ROUTED_WEIGHT=mul_routed_weight,
+        #     top_k=top_k,
+        #     compute_type=compute_type,
+        #     use_fp8_w8a8=use_fp8_w8a8,
+        #     use_int8_w8a16=use_int8_w8a16,
+        #     **config,
+        # )
 
 
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
@@ -1106,7 +1302,8 @@ def fused_experts(hidden_states: torch.Tensor,
                   a2_scale: Optional[torch.Tensor] = None,
                   block_shape: Optional[List[int]] = None):
     if inplace:
-        torch.ops.vllm.inplace_fused_experts(hidden_states, w1, w2,
+        # torch.ops.vllm.inplace_fused_experts(hidden_states, w1, w2,
+        inplace_fused_experts(hidden_states, w1, w2,
                                              topk_weights, topk_ids,
                                              use_fp8_w8a8, use_int8_w8a16,
                                              use_int4_w4a16, w1_scale,
@@ -1220,8 +1417,10 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
+        # sorted_token_ids, expert_ids, num_tokens_post_padded = (
+        #     moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'], E))
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'], E))
+            ref_moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'], E))
 
         invoke_fused_moe_kernel(curr_hidden_states,
                                 w1,
@@ -1243,8 +1442,10 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int4_w4a16=use_int4_w4a16,
                                 block_shape=block_shape)
 
-        torch.ops._C.silu_and_mul(intermediate_cache2,
-                                  intermediate_cache1.view(-1, N))
+        # torch.ops._C.silu_and_mul(intermediate_cache2,
+        #                           intermediate_cache1.view(-1, N))
+        import intel_extension_for_pytorch as ipex
+        ipex.llm.functional.silu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
 
         invoke_fused_moe_kernel(intermediate_cache2,
                                 w2,
@@ -1266,8 +1467,24 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int4_w4a16=use_int4_w4a16,
                                 block_shape=block_shape)
 
-        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
+        # ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+        #             out_hidden_states[begin_chunk_idx:end_chunk_idx])
+        if topk_ids.shape[1] == 1:
+            out_hidden_states[begin_chunk_idx:end_chunk_idx].copy_(
+                intermediate_cache3[:, 0]
+            )
+        elif topk_ids.shape[1] == 2:
+            torch.add(
+                intermediate_cache3[:, 0],
+                intermediate_cache3[:, 1],
+                out=out_hidden_states[begin_chunk_idx:end_chunk_idx],
+            ).squeeze(dim=1)
+        elif topk_ids.shape[1] > 2:
+            torch.sum(
+                intermediate_cache3.view(*intermediate_cache3.shape),
+                dim=1,
+                out=out_hidden_states[begin_chunk_idx:end_chunk_idx],
+            )
     return out_hidden_states
 
 
