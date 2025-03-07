@@ -314,6 +314,7 @@ class ipex_ops:
         is_casual: bool,
         return_softmax: bool,
         gen_: Optional[torch.Generator],
+        softcap: float = -1.0,
     ):
         return torch.ops.torch_ipex.chunked_prefill(
             query.contiguous(),
@@ -333,6 +334,7 @@ class ipex_ops:
             is_casual,
             return_softmax,
             gen_,
+            softcap,
         )
 
     @staticmethod
