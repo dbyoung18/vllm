@@ -519,44 +519,32 @@ def w8a8_block_fp8_matmul(
             "num_stages": 2,
         }
 
-    # def grid(META):
-    #     return (triton.cdiv(M, META["BLOCK_SIZE_M"]) *
-    #             triton.cdiv(N, META["BLOCK_SIZE_N"]), )
+    def grid(META):
+        return (triton.cdiv(M, META["BLOCK_SIZE_M"]) *
+                triton.cdiv(N, META["BLOCK_SIZE_N"]), )
 
-    # _w8a8_block_fp8_matmul[grid](
-    #     A,
-    #     B,
-    #     C,
-    #     As,
-    #     Bs,
-    #     M,
-    #     N,
-    #     K,
-    #     block_n,
-    #     block_k,
-    #     A.stride(-2),
-    #     A.stride(-1),
-    #     B.stride(1),
-    #     B.stride(0),
-    #     C.stride(-2),
-    #     C.stride(-1),
-    #     As.stride(-2),
-    #     As.stride(-1),
-    #     Bs.stride(1),
-    #     Bs.stride(0),
-    #     **config,
-    # )
+    _w8a8_block_fp8_matmul[grid](
+        A,
+        B,
+        C,
+        As,
+        Bs,
+        M,
+        N,
+        K,
+        block_n,
+        block_k,
+        A.stride(-2),
+        A.stride(-1),
+        B.stride(1),
+        B.stride(0),
+        C.stride(-2),
+        C.stride(-1),
+        As.stride(-2),
+        As.stride(-1),
+        Bs.stride(1),
+        Bs.stride(0),
+        **config,
+    )
 
-    # return C
-
-    def ref_w8a8_block_fp8_matmul():
-        As_repeat = As.repeat_interleave(block_size[0], dim=1)
-        Bs_repeat = Bs.repeat_interleave(block_size[1], dim=0)
-        Bs_repeat = Bs_repeat.repeat_interleave(block_size[0], dim=1)
-        Bs_repeat = Bs_repeat[:N, :]
-        A_dequant = A.to(torch.float32) * As_repeat
-        B_dequant = B.to(torch.float32) * Bs_repeat
-        C = torch.matmul(A_dequant.to(torch.float16), B_dequant.t().to(torch.float16)).to(output_dtype)
-        return C
-    C_ref = ref_w8a8_block_fp8_matmul()
-    return C_ref
+    return C

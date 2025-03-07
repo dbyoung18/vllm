@@ -910,48 +910,46 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         )
 
     else:
-        # TODO: fix fused_moe_kernel
-        return
-        # fused_moe_kernel[grid](
-        #     A,
-        #     B,
-        #     C,
-        #     A_scale,
-        #     B_scale,
-        #     topk_weights,
-        #     sorted_token_ids,
-        #     expert_ids,
-        #     num_tokens_post_padded,
-        #     B.shape[1],
-        #     A.shape[1],
-        #     EM,
-        #     topk_ids.numel(),
-        #     A.stride(0),
-        #     A.stride(1),
-        #     B.stride(0),
-        #     B.stride(2),
-        #     B.stride(1),
-        #     C.stride(1),
-        #     C.stride(2),
-        #     A_scale.stride(0)
-        #     if A_scale is not None and A_scale.ndim == 2 else 0,
-        #     A_scale.stride(1)
-        #     if A_scale is not None and A_scale.ndim == 2 else 0,
-        #     B_scale.stride(0)
-        #     if B_scale is not None and B_scale.ndim >= 2 else 0,
-        #     B_scale.stride(2)
-        #     if B_scale is not None and B_scale.ndim == 3 else 0,
-        #     B_scale.stride(1)
-        #     if B_scale is not None and B_scale.ndim >= 2 else 0,
-        #     0 if block_shape is None else block_shape[0],
-        #     0 if block_shape is None else block_shape[1],
-        #     MUL_ROUTED_WEIGHT=mul_routed_weight,
-        #     top_k=top_k,
-        #     compute_type=compute_type,
-        #     use_fp8_w8a8=use_fp8_w8a8,
-        #     use_int8_w8a16=use_int8_w8a16,
-        #     **config,
-        # )
+        fused_moe_kernel[grid](
+            A,
+            B,
+            C,
+            A_scale,
+            B_scale,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            B.shape[1],
+            A.shape[1],
+            EM,
+            topk_ids.numel(),
+            A.stride(0),
+            A.stride(1),
+            B.stride(0),
+            B.stride(2),
+            B.stride(1),
+            C.stride(1),
+            C.stride(2),
+            A_scale.stride(0)
+            if A_scale is not None and A_scale.ndim == 2 else 0,
+            A_scale.stride(1)
+            if A_scale is not None and A_scale.ndim == 2 else 0,
+            B_scale.stride(0)
+            if B_scale is not None and B_scale.ndim >= 2 else 0,
+            B_scale.stride(2)
+            if B_scale is not None and B_scale.ndim == 3 else 0,
+            B_scale.stride(1)
+            if B_scale is not None and B_scale.ndim >= 2 else 0,
+            0 if block_shape is None else block_shape[0],
+            0 if block_shape is None else block_shape[1],
+            MUL_ROUTED_WEIGHT=mul_routed_weight,
+            top_k=top_k,
+            compute_type=compute_type,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            **config,
+        )
 
 
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
