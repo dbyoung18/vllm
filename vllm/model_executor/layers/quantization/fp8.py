@@ -142,8 +142,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        self.use_marlin = (not current_platform.has_device_capability(89)
-                           or envs.VLLM_TEST_FORCE_FP8_MARLIN)
+        # self.use_marlin = (not current_platform.has_device_capability(89)
+        #                    or envs.VLLM_TEST_FORCE_FP8_MARLIN)
         # Disable marlin for rocm
         if current_platform.is_rocm():
             self.use_marlin = False
@@ -152,6 +152,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             # Marlin doesn't support block-wise fp8
             self.use_marlin = False
+        self.use_marlin = False
 
     def create_weights(
         self,
