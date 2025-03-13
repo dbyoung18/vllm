@@ -13,6 +13,7 @@ import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 from vllm.profiler import layerwise_profile
 from vllm.utils import FlexibleArgumentParser
 
@@ -256,18 +257,21 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
     print("Profile run ...")
     add_requests()
 
-    with layerwise_profile() as prefill_prof:
+    # with layerwise_profile() as prefill_prof:
+    with torch.profiler.profile() as prefill_prof:
         llm.llm_engine.step()  # First step is prefill
 
     decode_profs = []
     for _ in tqdm.tqdm(range(num_steps_to_profile - 1)):
         num_running_seqs = llm.llm_engine.scheduler[
             0].get_num_unfinished_seq_groups()
-        with layerwise_profile(
-                num_running_seqs=num_running_seqs) as decode_prof:
+        # with layerwise_profile(
+        #         num_running_seqs=num_running_seqs) as decode_prof:
+        with torch.profiler.profile() as decode_prof:
             llm.llm_engine.step()
         decode_profs.append(decode_prof)
 
+    """
     decode_results_list = [prof.results for prof in decode_profs]
     prefill_results = prefill_prof.results
     has_decode = len(decode_results_list) > 0
@@ -321,17 +325,18 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
                 csv_filename_base + "_decode_summary_table.csv")
 
     if json_output:
-        cuda_devices = [
-            torch.cuda.get_device_properties(dev_idx)
-            for dev_idx in range(torch.cuda.device_count())
+        device_type = current_platform.device_type
+        devices = [
+            getattr(torch, device_type).get_device_properties(dev_idx)
+            for dev_idx in range(getattr(torch, device_type).device_count())
         ]
 
         json_dict = {
             "context": {
                 "python_version": f"{sys.version}",
                 "torch_version": f"{torch.__version__}",
-                "torch_cuda_version": f"{torch.version.cuda}",
-                "cuda_devices": f"{cuda_devices}",
+                "torch_device_version": f"{getattr(torch.version, device_type)}",
+                "devices": f"{devices}",
                 **asdict(context)
             },
             "prefill": prefill_results.convert_stats_to_dict(),
@@ -347,6 +352,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
         with open(json_output_file, "w+") as f:
             json.dump(json_dict, f, indent=2)
         pass
+    """
 
     if context.save_chrome_traces_folder is not None:
         os.makedirs(context.save_chrome_traces_folder, exist_ok=True)
