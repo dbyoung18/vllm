@@ -331,6 +331,8 @@ class ipex_ops:
             p_dropout,
             softmax_scale,
             zero_tensors,
+            -1,
+            -1,
             is_casual,
             return_softmax,
             gen_,

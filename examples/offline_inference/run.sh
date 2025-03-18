@@ -1,6 +1,7 @@
 #!/bin/bash
 
 : ${MODEL=${1:-"deepseek-ai/DeepSeek-V3"}} # HF model id
+# : ${MODEL=${1:-"deepseek-ai/DeepSeek-V2"}} # HF model id
 : ${TP=${2:-1}}                            # tensor-parallel
 : ${PP=${3:-1}}                            # pipeline-parallel - AsyncLLMEngine
 : ${EP=${4:-1}}                            # expert-parallel - (MOE)-WIP

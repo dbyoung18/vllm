@@ -25,7 +25,7 @@ def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
                         temperature=0.8,
                         top_p=0.95,
                         top_k=-1,
-                        max_tokens=512)),
+                        max_tokens=8)),
     ]
 
 

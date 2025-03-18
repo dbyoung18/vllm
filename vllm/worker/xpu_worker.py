@@ -5,7 +5,7 @@ import os
 from typing import List, Optional, Tuple
 
 import intel_extension_for_pytorch  # noqa: F401
-import oneccl_bindings_for_pytorch  # noqa: F401
+# import oneccl_bindings_for_pytorch  # noqa: F401
 import torch
 import torch.distributed
 
@@ -174,7 +174,7 @@ class XPUWorker(Worker):
                 rank=rank,
                 distributed_init_method=distributed_init_method,
                 local_rank=self.local_rank,
-                backend="ccl")
+                backend="xccl")
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
