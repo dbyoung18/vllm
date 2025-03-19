@@ -96,6 +96,12 @@ class IpexAttnMetadataBuilder(
     AttentionMetadataBuilder[IpexAttnMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+        self.sliding_window = input_builder.sliding_window
+        self.block_size = input_builder.block_size
+
+    def prepare(self):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
@@ -108,11 +114,6 @@ class IpexAttnMetadataBuilder(
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
         self.has_prefix_cache_hit = False
-
-        self.input_builder = input_builder
-        self.runner = input_builder.runner
-        self.sliding_window = input_builder.sliding_window
-        self.block_size = input_builder.block_size
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -239,6 +240,7 @@ class IpexAttnMetadataBuilder(
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
+            enable_kv_scales_calculation=False,
             seq_lens=seq_lens,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
             seq_lens_tensor=seq_lens_tensor,
@@ -344,10 +346,14 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             shape = [num_tokens, num_heads * head_size]
         """
         # NOTE(woosuk): IPEXAttention does not support FP8 KV cache.
-        assert k_scale_float == 1.0 and v_scale_float == 0.0, (
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0, (
             "key/v_scale is not supported in IPEXAttention.")
-        #assert output is not None, "Output tensor must be provided."
+        # assert output is not None, "Output tensor must be provided."
         output = torch.empty_like(query)
+        if attn_metadata is None or attn_metadata.seq_start_loc is None:
+            print("!!!profile run")
+            # Profiling run.
+            return output
         attn_type = self.attn_type
         if (attn_type == AttentionType.ENCODER
                 and (not attn_metadata.is_all_encoder_attn_metadata_set)):
@@ -398,8 +404,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     value_cache,
                     updated_slot_mapping.flatten(),  # type: ignore[union-attr]
                     kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale_float,
+                    layer._v_scale_float,
                 )
         else :
             return output
@@ -479,7 +485,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     "Only decoder-only models support prefix caching")
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
-                ipex_ops.chunked_prefill(  # noqa
+                ipex_ops.chunked_prefill_legacy(  # noqa
                     query=query,
                     key_cache=key_cache,
                     value_cache=value_cache,
@@ -511,7 +517,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             assert attn_type == AttentionType.DECODER, (
                 "Only decoder-only models support max_decode_query_len > 1"
             )
-            ipex_ops.chunked_prefill(
+            ipex_ops.chunked_prefill_legacy(
                 query=decode_query,
                 key_cache=key_cache,
                 value_cache=value_cache,
