@@ -14,6 +14,7 @@ import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 from vllm.profiler import layerwise_profile
 from vllm.utils import FlexibleArgumentParser
 
@@ -257,15 +258,21 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
     print("Profile run ...")
     add_requests()
 
-    with layerwise_profile() as prefill_prof:
+    # with layerwise_profile() as prefill_prof:
+    with torch.profiler.profile(
+        activities=torch.profiler.supported_activities()
+    ) as prefill_prof:
         llm.llm_engine.step()  # First step is prefill
 
     decode_profs = []
     for _ in tqdm.tqdm(range(num_steps_to_profile - 1)):
         num_running_seqs = llm.llm_engine.scheduler[
             0].get_num_unfinished_seq_groups()
-        with layerwise_profile(
-                num_running_seqs=num_running_seqs) as decode_prof:
+        # with layerwise_profile(
+        #         num_running_seqs=num_running_seqs) as decode_prof:
+        with torch.profiler.profile(
+            activities=torch.profiler.supported_activities()
+        ) as decode_prof:
             llm.llm_engine.step()
         decode_profs.append(decode_prof)
 
@@ -353,9 +360,23 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
         os.makedirs(context.save_chrome_traces_folder, exist_ok=True)
         prefill_prof.profiler.export_chrome_trace(
             context.save_chrome_traces_folder + "/prefill.json")
+        prof_table = prefill_prof.profiler.key_averages().table(
+            sort_by=f"self_{current_platform.device_type}_time_total"
+        )
+        torch.save(
+            prof_table, f"{context.save_chrome_traces_folder}_prefill_{current_platform.device_type}.pt"
+        )
+        print(f"=== prefill profile ===\n{prof_table}")
         for idx, decode_prof in enumerate(decode_profs):
             decode_prof.profiler.export_chrome_trace(
                 context.save_chrome_traces_folder + f"/decode_{idx + 1}.json")
+            prof_table = decode_prof.profiler.key_averages().table(
+                sort_by=f"self_{current_platform.device_type}_time_total"
+            )
+            torch.save(
+                prof_table, f"{context.save_chrome_traces_folder}_decode_{idx + 1}_{current_platform.device_type}.pt"
+            )
+            print(f"=== decode {idx + 1} profile ===\n{prof_table}")
         print("Traces saved as prefill.json and decode_1.json, etc."
               f" in folder {context.save_chrome_traces_folder}")
 

@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 import vllm.envs as envs
+import intel_extension_for_pytorch as ipex
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -1275,14 +1276,24 @@ def fused_experts(hidden_states: torch.Tensor,
                   block_shape: Optional[List[int]] = None) -> torch.Tensor:
 
     if inplace:
-        torch.ops.vllm.inplace_fused_experts(
+        # torch.ops.vllm.inplace_fused_experts(
+        #     hidden_states, w1, w2, topk_weights, topk_ids, activation,
+        #     use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16, global_num_experts,
+        #     expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
+        #     block_shape)
+        inplace_fused_experts(
             hidden_states, w1, w2, topk_weights, topk_ids, activation,
             use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16, global_num_experts,
             expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
             block_shape)
         return hidden_states
     else:
-        return torch.ops.vllm.outplace_fused_experts(
+        # return torch.ops.vllm.outplace_fused_experts(
+        #     hidden_states, w1, w2, topk_weights, topk_ids, activation,
+        #     use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16, global_num_experts,
+        #     expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
+        #     block_shape)
+        return outplace_fused_experts(
             hidden_states, w1, w2, topk_weights, topk_ids, activation,
             use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16, global_num_experts,
             expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
@@ -1426,11 +1437,15 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 block_shape=block_shape)
 
         if activation == "silu":
-            torch.ops._C.silu_and_mul(intermediate_cache2,
-                                      intermediate_cache1.view(-1, N))
+            # torch.ops._C.silu_and_mul(intermediate_cache2,
+            #                           intermediate_cache1.view(-1, N))
+            ipex.llm.functional.silu_and_mul(intermediate_cache1.view(-1, N),
+                                             intermediate_cache2)
         elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(intermediate_cache2,
-                                      intermediate_cache1.view(-1, N))
+            # torch.ops._C.gelu_and_mul(intermediate_cache2,
+            #                           intermediate_cache1.view(-1, N))
+            ipex.llm.functional.gelu_and_mul(intermediate_cache1.view(-1, N),
+                                             intermediate_cache2)
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
@@ -1454,8 +1469,24 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int4_w4a16=use_int4_w4a16,
                                 block_shape=block_shape)
 
-        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
+        # ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+        #             out_hidden_states[begin_chunk_idx:end_chunk_idx])
+        if topk_ids.shape[1] == 1:
+            out_hidden_states[begin_chunk_idx:end_chunk_idx].copy_(
+                intermediate_cache3[:, 0]
+            )
+        elif topk_ids.shape[1] == 2:
+            torch.add(
+                intermediate_cache3[:, 0],
+                intermediate_cache3[:, 1],
+                out=out_hidden_states[begin_chunk_idx:end_chunk_idx],
+            ).squeeze(dim=1)
+        elif topk_ids.shape[1] > 2:
+            torch.sum(
+                intermediate_cache3.view(*intermediate_cache3.shape),
+                dim=1,
+                out=out_hidden_states[begin_chunk_idx:end_chunk_idx],
+            )
     return out_hidden_states
 
 

@@ -9,15 +9,20 @@ from vllm.utils import FlexibleArgumentParser
 def create_test_prompts() -> list[tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
     return [
-        ("A robot may not injure a human being",
-         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1)),
-        ("To be or not to be,",
-         SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
-        ("What is the meaning of life?",
-         SamplingParams(n=2,
+        # ("A robot may not injure a human being",
+        #  SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1)),
+        # ("To be or not to be,",
+        #  SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
+        # ("What is the meaning of life?",
+        #  SamplingParams(n=2,
+        #                 temperature=0.8,
+        #                 top_p=0.95,
+        #                 frequency_penalty=0.1)),
+        ("Once upon a time, there existed a little girl, who liked to have adventures. She wanted to go to places and meet new people, and have fun.",
+         SamplingParams(n=1,
                         temperature=0.8,
-                        top_p=0.95,
-                        frequency_penalty=0.1)),
+                        top_k=-1,
+                        max_tokens=8)),
     ]
 
 
@@ -57,4 +62,5 @@ if __name__ == '__main__':
         description='Demo on using the LLMEngine class directly')
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    print(f"==>vllm::args,{args}")
     main(args)

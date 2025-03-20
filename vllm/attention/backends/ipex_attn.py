@@ -443,6 +443,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     prefill_output,
                     seqlen_q,
                     seqlen_q,
+                    alibi_slopes,
                     max_seqlen,
                     max_seqlen,
                     pdropout=0.0,
@@ -451,6 +452,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     is_causal=True,
                     return_softmax=False,
                     gen_=None,
+                    window_size_left=-1,
+                    window_size_right=-1,
                     logits_soft_cap=0,
                 )
                 '''
